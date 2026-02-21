@@ -26,6 +26,23 @@ class DiagnosisEngine:
         with open(PROTOCOL_DATA_PATH, "r", encoding="utf-8") as f:
             self.protocol_data = json.load(f)
 
+        # Pre-lemmatize symptoms and distinguishing features for speed
+        print("  Pre-lemmatizing protocol data...")
+        for pid, pd in self.protocol_data.items():
+            features = pd.get("features", {})
+            
+            # Pre-lemmatize symptoms
+            symptoms_list = features.get("symptoms", [])
+            pd["lemmatized_symptoms"] = [
+                self.feature_builder.lemmatize(s) for s in symptoms_list
+            ]
+            
+            # Pre-compute TF-IDF for distinguishing features
+            for cd in features.get("icd_code_descriptions", []):
+                dist_feat = cd.get("distinguishing_features", "")
+                if dist_feat:
+                    cd["dist_tfidf"] = self.feature_builder.tfidf.transform([dist_feat])
+
         # Compute code frequency for feature builder
         code_freq = {}
         for pd in self.protocol_data.values():
@@ -48,15 +65,10 @@ class DiagnosisEngine:
         if not symptoms or not symptoms.strip():
             return []
 
-        # Step 1: Retrieve top-K protocols
-        retrieved = self.retriever.retrieve(symptoms, top_k=TOP_K_PROTOCOLS)
+        # Step 1: Retrieve top-K protocols and query embedding
+        retrieved, query_embedding = self.retriever.retrieve(symptoms, top_k=TOP_K_PROTOCOLS)
 
-        # Step 2: Get query embedding for features
-        query_embedding = self.retriever.model.encode(
-            f"query: {symptoms}", show_progress_bar=False
-        )
-
-        # Step 3: Build candidates from all ICD codes in top-K protocols
+        # Step 2: Build candidates from all ICD codes in top-K protocols
         candidates = []
         seen_codes = set()
         for rank_idx, (pid, score) in enumerate(retrieved):
@@ -67,6 +79,7 @@ class DiagnosisEngine:
             icd_codes = pd.get("icd_codes", [])
             features = pd.get("features", {})
             symptoms_list = features.get("symptoms", [])
+            lemmatized_symptoms = pd.get("lemmatized_symptoms", [])
             body_system = features.get("body_system", "")
             icd_code_descriptions = features.get("icd_code_descriptions", [])
 
@@ -81,6 +94,7 @@ class DiagnosisEngine:
                     "protocol_rank": rank_idx,
                     "n_codes": len(icd_codes),
                     "symptoms": symptoms_list,
+                    "lemmatized_symptoms": lemmatized_symptoms,
                     "body_system": body_system,
                     "icd_code_descriptions": icd_code_descriptions,
                     "disease_name": features.get("disease_name", ""),

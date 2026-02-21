@@ -55,7 +55,7 @@ class FeatureBuilder:
         """Set code corpus frequency from protocol data."""
         self.code_frequency = freq
 
-    def _lemmatize(self, text: str) -> set[str]:
+    def lemmatize(self, text: str) -> set[str]:
         words = re.findall(r"[а-яёА-ЯЁa-zA-Z]+", text.lower())
         lemmas = set()
         for word in words:
@@ -66,18 +66,19 @@ class FeatureBuilder:
                 lemmas.add(word)
         return lemmas
 
-    def _symptom_overlap(self, query_lemmas: set[str], symptoms: list[str]) -> float:
-        if not symptoms:
+    def _symptom_overlap(
+        self, query_lemmas: set[str], lemmatized_symptoms: list[set[str]]
+    ) -> float:
+        if not lemmatized_symptoms:
             return 0.0
         matches = 0
-        for symptom in symptoms:
-            symptom_lemmas = self._lemmatize(symptom)
+        for symptom_lemmas in lemmatized_symptoms:
             if not symptom_lemmas:
                 continue
             overlap = len(symptom_lemmas & query_lemmas) / len(symptom_lemmas)
             if overlap >= 0.5:
                 matches += 1
-        return matches / len(symptoms)
+        return matches / len(lemmatized_symptoms)
 
     @staticmethod
     def _get_icd_chapter_idx(code: str) -> int:
@@ -94,25 +95,14 @@ class FeatureBuilder:
         query_embedding: np.ndarray,
         candidates: list[dict],
     ) -> np.ndarray:
-        """Build feature matrix for candidate ICD codes.
-
-        Each candidate is a dict with:
-          - code: ICD-10 code
-          - protocol_id: which protocol it came from
-          - retrieval_score: cosine similarity from retriever
-          - protocol_rank: position in retrieval results (0-indexed)
-          - n_codes: total codes in the protocol
-          - symptoms: list of symptoms from protocol features
-          - body_system: body system string
-          - icd_code_descriptions: list of code desc dicts from features
-        """
+        """Build feature matrix for candidate ICD codes."""
         n = len(candidates)
         if n == 0:
             return np.zeros((0, 10), dtype=np.float32)
 
         # Pre-compute query TF-IDF
         query_tfidf = self.tfidf.transform([query])
-        query_lemmas = self._lemmatize(query)
+        query_lemmas = self.lemmatize(query)
 
         features = np.zeros((n, 10), dtype=np.float32)
 
@@ -125,15 +115,11 @@ class FeatureBuilder:
             # 2. TF-IDF similarity (query <-> ICD description)
             if code in self.code_to_idx:
                 cidx = self.code_to_idx[code]
-                features[i, 1] = float(
-                    cosine_similarity(query_tfidf, self.code_tfidf[cidx : cidx + 1])[
-                        0, 0
-                    ]
-                )
+                features[i, 1] = float(query_tfidf.dot(self.code_tfidf[cidx].T).item())
 
-            # 3. Symptom overlap
+            # 3. Symptom overlap (using pre-lemmatized symptoms)
             features[i, 2] = self._symptom_overlap(
-                query_lemmas, cand.get("symptoms", [])
+                query_lemmas, cand.get("lemmatized_symptoms", [])
             )
 
             # 4. Query <-> ICD code embedding similarity
@@ -159,15 +145,12 @@ class FeatureBuilder:
             features[i, 8] = self.code_frequency.get(code, 0)
 
             # 10. Distinguishing features similarity
-            dist_feat = ""
+            dist_tfidf = None
             for cd in cand.get("icd_code_descriptions", []):
                 if cd.get("code") == code:
-                    dist_feat = cd.get("distinguishing_features", "")
+                    dist_tfidf = cd.get("dist_tfidf")
                     break
-            if dist_feat:
-                dist_vec = self.tfidf.transform([dist_feat])
-                features[i, 9] = float(
-                    cosine_similarity(query_tfidf, dist_vec)[0, 0]
-                )
+            if dist_tfidf is not None:
+                features[i, 9] = float(query_tfidf.dot(dist_tfidf.T).item())
 
         return features

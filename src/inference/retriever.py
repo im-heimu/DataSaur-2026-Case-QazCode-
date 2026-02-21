@@ -35,10 +35,10 @@ class ProtocolRetriever:
 
     def retrieve(
         self, query: str, top_k: int = TOP_K_PROTOCOLS
-    ) -> list[tuple[str, float]]:
+    ) -> tuple[list[tuple[str, float]], np.ndarray]:
         """Retrieve top-K protocols for a query.
 
-        Returns list of (protocol_id, similarity_score) tuples.
+        Returns tuple of (list of (protocol_id, similarity_score), query_embedding).
         """
         query_embedding = self.model.encode(
             f"query: {query}", show_progress_bar=False
@@ -57,4 +57,4 @@ class ProtocolRetriever:
         for idx in top_indices:
             results.append((self.protocol_ids[idx], float(similarities[idx])))
 
-        return results
+        return results, query_embedding

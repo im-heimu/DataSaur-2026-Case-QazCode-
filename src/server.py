@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from fastapi.concurrency import run_in_threadpool
 from src.inference.engine import DiagnosisEngine
 from src.models import Diagnosis, DiagnoseRequest, DiagnoseResponse
 
@@ -34,7 +35,11 @@ async def handle_diagnose(request: DiagnoseRequest) -> DiagnoseResponse:
     """Diagnose based on symptoms text."""
     symptoms = request.symptoms or ""
 
-    results = engine.diagnose(symptoms)
+    if engine is None:
+        return DiagnoseResponse(diagnoses=[])
+
+    # Offload CPU-bound inference to a thread pool to avoid blocking the event loop
+    results = await run_in_threadpool(engine.diagnose, symptoms)
 
     diagnoses = [
         Diagnosis(
