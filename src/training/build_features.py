@@ -137,9 +137,11 @@ def main():
     # Build training groups: each group is (query, protocol) with all codes as candidates
     logger.info("Building feature matrix...")
 
-    # Combine synthetic + test queries
+    # Combine synthetic + test queries (filter out None queries)
     all_queries = []
     for item in synthetic:
+        if not item.get("query"):
+            continue
         all_queries.append({
             "query": item["query"],
             "protocol_id": item["protocol_id"],
@@ -148,6 +150,8 @@ def main():
             "is_test": False,
         })
     for tq in test_queries:
+        if not tq.get("query"):
+            continue
         all_queries.append({
             "query": tq["query"],
             "protocol_id": tq["protocol_id"],
