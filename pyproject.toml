@@ -26,6 +26,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "lo",
     "loguru>=0.7.3",
+    "datasets>=4.5.0",
 ]
 
 [dependency-groups]
