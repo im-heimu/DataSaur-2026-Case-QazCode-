@@ -21,34 +21,63 @@ from sentence_transformers import SentenceTransformer
 from src.config import settings, setup_logging
 
 
-def truncate_protocol_text(text: str, max_chars: int = 1500) -> str:
-    """Truncate protocol text to diagnostic sections only.
+def load_protocol_passages() -> dict[str, str]:
+    """Build rich passage texts for embedding by combining summaries + features.
 
-    Keeps ~1500 chars (fits in 512 tokens for multilingual-e5-base).
+    Combines GPT-generated summaries (patient-facing language) with
+    extracted symptoms and disease names for best semantic matching
+    against patient complaint queries.
     """
-    earliest_pos = len(text)
-    for marker in settings.truncation_markers:
-        pos = text.find(marker)
-        if pos != -1 and pos < earliest_pos:
-            earliest_pos = pos
+    # Load summaries
+    summaries = {}
+    if settings.protocol_summaries_path.exists():
+        with open(settings.protocol_summaries_path, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                summaries[data["protocol_id"]] = data["summary"]
 
-    truncated = text[:earliest_pos].strip()
-    if len(truncated) > max_chars:
-        truncated = truncated[:max_chars]
-    return truncated
+    # Load features (symptoms, disease name)
+    features = {}
+    if settings.protocol_features_path.exists():
+        with open(settings.protocol_features_path, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                features[data["protocol_id"]] = data
 
+    # Combine into passages
+    passages = {}
+    all_pids = set(summaries.keys())
 
-def load_protocol_texts() -> dict[str, str]:
-    """Load truncated protocol texts from corpus for embedding."""
-    texts = {}
-    with open(settings.corpus_path, "r", encoding="utf-8") as f:
-        for line in f:
-            data = json.loads(line)
-            pid = data["protocol_id"]
-            text = truncate_protocol_text(data.get("text", ""))
-            if text:
-                texts[pid] = text
-    return texts
+    # Also include protocols without summaries from corpus
+    if settings.corpus_path.exists():
+        with open(settings.corpus_path, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                all_pids.add(data["protocol_id"])
+
+    for pid in all_pids:
+        parts = []
+
+        # Disease name from features
+        feat = features.get(pid, {})
+        if feat.get("disease_name"):
+            parts.append(feat["disease_name"])
+
+        # Symptoms list
+        symptoms = feat.get("symptoms", [])
+        if symptoms:
+            parts.append("Симптомы: " + ", ".join(symptoms[:15]))
+
+        # Summary (main content)
+        if pid in summaries:
+            parts.append(summaries[pid])
+
+        if parts:
+            # Cap at ~1500 chars to fit in 512 tokens
+            passage = "\n".join(parts)[:1500]
+            passages[pid] = passage
+
+    return passages
 
 
 def load_test_queries() -> list[dict]:
@@ -78,8 +107,8 @@ def main():
     model.max_seq_length = settings.retriever_max_seq_length
 
     logger.info("Loading data...")
-    protocol_texts = load_protocol_texts()
-    logger.info("  Protocol texts: {}", len(protocol_texts))
+    protocol_passages = load_protocol_passages()
+    logger.info("  Protocol passages: {}", len(protocol_passages))
 
     test_queries = load_test_queries()
     logger.info("  Test queries: {}", len(test_queries))
@@ -90,8 +119,8 @@ def main():
 
     # Pre-compute protocol embeddings
     logger.info("Pre-computing protocol embeddings...")
-    protocol_ids = sorted(protocol_texts.keys())
-    passages = [f"passage: {protocol_texts[pid]}" for pid in protocol_ids]
+    protocol_ids = sorted(protocol_passages.keys())
+    passages = [f"passage: {protocol_passages[pid]}" for pid in protocol_ids]
     embeddings = model.encode(passages, show_progress_bar=True, batch_size=32)
 
     np.save(str(settings.protocol_embeddings_path), embeddings)
