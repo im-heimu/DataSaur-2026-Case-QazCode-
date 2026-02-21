@@ -1,25 +1,19 @@
-"""Step 4: Fine-tune bi-encoder for protocol retrieval.
+"""Step 4: Save base bi-encoder and pre-compute protocol embeddings.
 
-Fine-tunes multilingual-e5-base on (query, protocol_summary) pairs
-using MultipleNegativesRankingLoss.
+Uses multilingual-e5-base without fine-tuning (MNR loss degrades performance
+on this task due to semantically overlapping medical protocols).
+Retrieval is boosted by hybrid BM25+semantic search in the inference retriever.
 
 Usage:
     uv run python -m src.training.train_retriever
 """
 
 import json
-import random
 
 import numpy as np
 import torch
 from loguru import logger
-from sentence_transformers import (
-    SentenceTransformer,
-    InputExample,
-    losses,
-    evaluation,
-)
-from torch.utils.data import DataLoader
+from sentence_transformers import SentenceTransformer
 
 from src.config import settings, setup_logging
 
@@ -32,15 +26,6 @@ def load_summaries() -> dict[str, str]:
             data = json.loads(line)
             summaries[data["protocol_id"]] = data["summary"]
     return summaries
-
-
-def load_synthetic() -> list[dict]:
-    """Load synthetic training data."""
-    data = []
-    with open(settings.synthetic_training_path, "r", encoding="utf-8") as f:
-        for line in f:
-            data.append(json.loads(line))
-    return data
 
 
 def load_test_queries() -> list[dict]:
@@ -57,64 +42,6 @@ def load_test_queries() -> list[dict]:
     return queries
 
 
-def build_training_examples(
-    synthetic: list[dict], summaries: dict[str, str],
-    max_per_protocol: int = 5,
-) -> list[InputExample]:
-    """Build training pairs with per-protocol cap to avoid false negatives."""
-    from collections import defaultdict
-
-    grouped = defaultdict(list)
-    for item in synthetic:
-        pid = item["protocol_id"]
-        if pid not in summaries:
-            continue
-        grouped[pid].append(item)
-
-    examples = []
-    for pid, items in grouped.items():
-        sampled = random.sample(items, min(len(items), max_per_protocol))
-        summary = summaries[pid]
-        for item in sampled:
-            examples.append(
-                InputExample(texts=[f"query: {item['query']}", f"passage: {summary}"])
-            )
-    random.shuffle(examples)
-    return examples
-
-
-def build_evaluator(
-    test_queries: list[dict], summaries: dict[str, str]
-) -> evaluation.InformationRetrievalEvaluator | None:
-    """Build IR evaluator from test queries."""
-    if not test_queries:
-        return None
-
-    queries_dict = {}
-    corpus_dict = {}
-    relevant_docs = {}
-
-    # Build corpus from all summaries
-    for pid, summary in summaries.items():
-        corpus_dict[pid] = f"passage: {summary}"
-
-    # Build queries and relevance
-    for i, tq in enumerate(test_queries):
-        qid = f"q_{i}"
-        queries_dict[qid] = f"query: {tq['query']}"
-        relevant_docs[qid] = {tq["protocol_id"]}
-
-    return evaluation.InformationRetrievalEvaluator(
-        queries=queries_dict,
-        corpus=corpus_dict,
-        relevant_docs=relevant_docs,
-        name="test-retrieval",
-        show_progress_bar=True,
-        batch_size=32,
-        main_score_function="cosine",
-    )
-
-
 def main():
     setup_logging()
     settings.retriever_dir.mkdir(parents=True, exist_ok=True)
@@ -122,7 +49,7 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("Device: {}", device)
 
-    # Always load from base model (no resume — prevents catastrophic forgetting)
+    # Use base model without fine-tuning
     logger.info("Loading base model: {}", settings.retriever_model_name)
     model = SentenceTransformer(settings.retriever_model_name, device=device)
     model.max_seq_length = settings.retriever_max_seq_length
@@ -131,53 +58,15 @@ def main():
     summaries = load_summaries()
     logger.info("  Summaries: {}", len(summaries))
 
-    synthetic = load_synthetic()
-    logger.info("  Synthetic queries: {}", len(synthetic))
-
     test_queries = load_test_queries()
     logger.info("  Test queries: {}", len(test_queries))
 
-    # Build training data
-    train_examples = build_training_examples(synthetic, summaries)
-    logger.info("  Training pairs: {}", len(train_examples))
-
-    if not train_examples:
-        logger.error("No training data! Run data prep steps first.")
-        return
-
-    train_dataloader = DataLoader(
-        train_examples, shuffle=True, batch_size=settings.retriever_batch_size
-    )
-    train_loss = losses.MultipleNegativesRankingLoss(model)
-
-    # Build evaluator
-    evaluator = build_evaluator(test_queries, summaries)
-
-    # 1 epoch with eval every 20% — save best, stop early if no improvement
-    steps_per_epoch = len(train_dataloader)
-    eval_steps = max(1, steps_per_epoch // 5)
-    warmup_steps = steps_per_epoch // 10
-    logger.info("Training for {} epochs, {} steps/epoch", settings.retriever_epochs, steps_per_epoch)
-    logger.info("Eval every {} steps, warmup {} steps", eval_steps, warmup_steps)
-
-    model.fit(
-        train_objectives=[(train_dataloader, train_loss)],
-        epochs=settings.retriever_epochs,
-        evaluator=evaluator,
-        evaluation_steps=eval_steps if evaluator else 0,
-        warmup_steps=warmup_steps,
-        output_path=str(settings.retriever_dir),
-        optimizer_params={"lr": settings.retriever_lr},
-        show_progress_bar=True,
-        save_best_model=True if evaluator else False,
-    )
-
-    logger.info("Model saved to {}", settings.retriever_dir)
+    # Save base model as retriever
+    model.save(str(settings.retriever_dir))
+    logger.info("Base model saved to {}", settings.retriever_dir)
 
     # Pre-compute protocol embeddings
     logger.info("Pre-computing protocol embeddings...")
-    model = SentenceTransformer(str(settings.retriever_dir), device=device)
-
     protocol_ids = sorted(summaries.keys())
     passages = [f"passage: {summaries[pid]}" for pid in protocol_ids]
     embeddings = model.encode(passages, show_progress_bar=True, batch_size=32)
@@ -192,22 +81,28 @@ def main():
     logger.info("Embeddings shape: {}", embeddings.shape)
     logger.info("Saved to {}", settings.protocol_embeddings_path)
 
-    # Quick recall@10 evaluation
+    # Quick recall@10 evaluation (semantic only, without BM25 hybrid)
     if test_queries:
-        logger.info("--- Retrieval Recall@10 on test set ---")
+        logger.info("--- Semantic-only Recall@10 on test set ---")
         query_texts = [f"query: {tq['query']}" for tq in test_queries]
         query_embs = model.encode(query_texts, show_progress_bar=True, batch_size=32)
 
+        # Normalize
+        emb_norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        emb_normalized = embeddings / np.maximum(emb_norms, 1e-8)
+
         hits = 0
         for i, tq in enumerate(test_queries):
-            sims = np.dot(embeddings, query_embs[i])
+            q_norm = query_embs[i] / max(np.linalg.norm(query_embs[i]), 1e-8)
+            sims = np.dot(emb_normalized, q_norm)
             top_indices = np.argsort(sims)[-10:][::-1]
             top_pids = [protocol_ids[idx] for idx in top_indices]
             if tq["protocol_id"] in top_pids:
                 hits += 1
 
         recall_at_10 = hits / len(test_queries)
-        logger.info("Recall@10: {:.4f} ({}/{})", recall_at_10, hits, len(test_queries))
+        logger.info("Semantic Recall@10: {:.4f} ({}/{})", recall_at_10, hits, len(test_queries))
+        logger.info("(Hybrid BM25+semantic will be higher at inference time)")
 
 
 if __name__ == "__main__":
