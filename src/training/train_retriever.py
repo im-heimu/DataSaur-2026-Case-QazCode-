@@ -161,16 +161,18 @@ def build_training_examples(
     return examples
 
 
-class RecallEvaluator:
+class RecallEvaluator(evaluation.SentenceEvaluator):
     """Evaluate Recall@10 on test queries during training."""
 
     def __init__(self, test_queries, passages, protocol_ids):
+        super().__init__()
         self.test_queries = test_queries
         self.passages = passages
         self.protocol_ids = protocol_ids
         self.passage_texts = [f"passage: {passages[pid]}" for pid in protocol_ids]
+        self.primary_metric = "recall_at_10"
 
-    def __call__(self, model, output_path=None, epoch=-1, steps=-1):
+    def __call__(self, model, output_path=None, epoch=-1, steps=-1, **kwargs):
         query_texts = [f"query: {tq['query']}" for tq in self.test_queries]
         query_embs = model.encode(query_texts, batch_size=64, show_progress_bar=False)
         passage_embs = model.encode(self.passage_texts, batch_size=64, show_progress_bar=False)
@@ -193,7 +195,8 @@ class RecallEvaluator:
         recall = hits / len(self.test_queries)
         logger.info("  [Eval] Recall@10: {:.4f} ({}/{}), epoch={}, steps={}",
                      recall, hits, len(self.test_queries), epoch, steps)
-        return recall
+        self.store_metrics_in_model_card_data(model, {"recall_at_10": recall})
+        return {"recall_at_10": recall}
 
 
 def main():
