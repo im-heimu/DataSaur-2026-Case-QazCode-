@@ -88,8 +88,10 @@ class DiagnosisEngine:
                     cidx = self.code_to_idx[code]
                     code_sim = float(np.dot(query_norm, self.code_embeddings[cidx]))
 
-                # Combined score: protocol relevance + code specificity
-                combined_score = retrieval_score * 0.3 + code_sim * 0.7
+                # Combined score: heavily weight retrieval (protocol match matters most)
+                # Protocol rank penalty: top-1 protocol gets full score, lower ones decay
+                rank_bonus = 1.0 / (1.0 + rank_idx * 0.5)
+                combined_score = retrieval_score * rank_bonus * 0.6 + code_sim * 0.4
 
                 # Find code name
                 code_name = code
