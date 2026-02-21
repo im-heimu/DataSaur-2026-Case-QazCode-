@@ -1,6 +1,7 @@
 """Text processing utilities for Russian medical text."""
 
 import re
+from functools import lru_cache
 
 import pymorphy3
 
@@ -14,34 +15,35 @@ def get_morph():
     return _morph
 
 
-def lemmatize_text(text: str) -> list[str]:
-    """Lemmatize Russian text using pymorphy3."""
+@lru_cache(maxsize=100000)
+def _lemmatize_word(word: str) -> str:
+    """Lemmatize a single word with caching."""
     morph = get_morph()
-    # Simple tokenization: split on non-word chars
+    parsed = morph.parse(word)
+    return parsed[0].normal_form if parsed else word
+
+
+def lemmatize_text(text: str) -> list[str]:
+    """Lemmatize Russian text using pymorphy3 with word-level caching."""
     words = re.findall(r"[а-яёА-ЯЁa-zA-Z]+", text.lower())
-    lemmas = []
-    for word in words:
-        parsed = morph.parse(word)
-        if parsed:
-            lemmas.append(parsed[0].normal_form)
-        else:
-            lemmas.append(word)
-    return lemmas
+    return [_lemmatize_word(w) for w in words]
+
+
+# Cache symptom lemmatization (same symptoms repeat across queries)
+_symptom_cache: dict[str, set[str]] = {}
 
 
 def compute_symptom_overlap(query: str, symptoms: list[str]) -> float:
-    """Compute fraction of protocol symptoms found in query text.
-
-    Uses lemmatization for better matching.
-    """
-    if not symptoms:
+    """Compute fraction of protocol symptoms found in query text."""
+    if not symptoms or not query:
         return 0.0
 
     query_lemmas = set(lemmatize_text(query))
     matches = 0
     for symptom in symptoms:
-        symptom_lemmas = set(lemmatize_text(symptom))
-        # A symptom matches if at least half its lemmas are in the query
+        if symptom not in _symptom_cache:
+            _symptom_cache[symptom] = set(lemmatize_text(symptom))
+        symptom_lemmas = _symptom_cache[symptom]
         if not symptom_lemmas:
             continue
         overlap = len(symptom_lemmas & query_lemmas) / len(symptom_lemmas)

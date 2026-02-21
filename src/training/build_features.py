@@ -179,6 +179,22 @@ def main():
     icd_chapters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     chapter_to_idx = {c: i for i, c in enumerate(icd_chapters)}
 
+    # Pre-compute symptom overlaps per (query_text, protocol_id) to avoid
+    # repeated pymorphy3 lemmatization — the main bottleneck.
+    logger.info("Pre-computing symptom overlaps...")
+    symptom_overlap_cache = {}
+    unique_pairs = {}
+    for i, q in enumerate(all_queries):
+        pid = q["protocol_id"]
+        if pid not in pid_to_idx:
+            continue
+        key = (i, pid)
+        if key not in unique_pairs:
+            unique_pairs[key] = (q["query"], pf_map.get(pid, {}).get("symptoms", []))
+
+    for (i, pid), (query_text, symptoms) in tqdm(unique_pairs.items(), desc="Symptom overlaps"):
+        symptom_overlap_cache[(i, pid)] = compute_symptom_overlap(query_text, symptoms)
+
     for i, q in enumerate(tqdm(all_queries, desc="Building features")):
         pid = q["protocol_id"]
         icd_codes = q["all_icd_codes"]
@@ -215,8 +231,8 @@ def main():
                 tfidf_sim = 0.0
             feat.append(tfidf_sim)
 
-            # 3. Symptom overlap
-            overlap = compute_symptom_overlap(q["query"], symptoms)
+            # 3. Symptom overlap (pre-computed)
+            overlap = symptom_overlap_cache.get((i, pid), 0.0)
             feat.append(overlap)
 
             # 4. Query <-> ICD code embedding similarity
