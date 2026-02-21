@@ -37,9 +37,9 @@ class Settings(BaseSettings):
     # ── Retriever ───────────────────────────────────────────────
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
-    retriever_epochs: int = 3
+    retriever_epochs: int = 1
     retriever_batch_size: int = 128
-    retriever_lr: float = 2e-5
+    retriever_lr: float = 1e-5
 
     # ── Ranker ──────────────────────────────────────────────────
     ranker_learning_rate: float = 0.05

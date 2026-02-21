@@ -115,14 +115,9 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("Device: {}", device)
 
-    # Resume from checkpoint if available, otherwise load base model
-    checkpoint = settings.retriever_dir / "config.json"
-    if checkpoint.exists():
-        logger.info("Resuming from checkpoint: {}", settings.retriever_dir)
-        model = SentenceTransformer(str(settings.retriever_dir), device=device)
-    else:
-        logger.info("Loading base model: {}", settings.retriever_model_name)
-        model = SentenceTransformer(settings.retriever_model_name, device=device)
+    # Always load from base model (no resume — prevents catastrophic forgetting)
+    logger.info("Loading base model: {}", settings.retriever_model_name)
+    model = SentenceTransformer(settings.retriever_model_name, device=device)
     model.max_seq_length = settings.retriever_max_seq_length
 
     logger.info("Loading data...")
@@ -151,16 +146,18 @@ def main():
     # Build evaluator
     evaluator = build_evaluator(test_queries, summaries)
 
-    # Train
-    warmup_steps = int(len(train_dataloader) * settings.retriever_epochs * 0.1)
-    logger.info("Training for {} epochs, {} steps/epoch", settings.retriever_epochs, len(train_dataloader))
-    logger.info("Warmup steps: {}", warmup_steps)
+    # 1 epoch with eval every 20% — save best, stop early if no improvement
+    steps_per_epoch = len(train_dataloader)
+    eval_steps = max(1, steps_per_epoch // 5)
+    warmup_steps = steps_per_epoch // 10
+    logger.info("Training for {} epochs, {} steps/epoch", settings.retriever_epochs, steps_per_epoch)
+    logger.info("Eval every {} steps, warmup {} steps", eval_steps, warmup_steps)
 
     model.fit(
         train_objectives=[(train_dataloader, train_loss)],
         epochs=settings.retriever_epochs,
         evaluator=evaluator,
-        evaluation_steps=len(train_dataloader) // 2 if evaluator else 0,
+        evaluation_steps=eval_steps if evaluator else 0,
         warmup_steps=warmup_steps,
         output_path=str(settings.retriever_dir),
         optimizer_params={"lr": settings.retriever_lr},
