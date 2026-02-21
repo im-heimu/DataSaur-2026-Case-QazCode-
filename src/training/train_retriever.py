@@ -58,20 +58,27 @@ def load_test_queries() -> list[dict]:
 
 
 def build_training_examples(
-    synthetic: list[dict], summaries: dict[str, str]
+    synthetic: list[dict], summaries: dict[str, str],
+    max_per_protocol: int = 5,
 ) -> list[InputExample]:
-    """Build training pairs: (query, positive_summary)."""
-    examples = []
+    """Build training pairs with per-protocol cap to avoid false negatives."""
+    from collections import defaultdict
+
+    grouped = defaultdict(list)
     for item in synthetic:
         pid = item["protocol_id"]
         if pid not in summaries:
             continue
-        query = item["query"]
+        grouped[pid].append(item)
+
+    examples = []
+    for pid, items in grouped.items():
+        sampled = random.sample(items, min(len(items), max_per_protocol))
         summary = summaries[pid]
-        # e5 models expect "query: " and "passage: " prefixes
-        examples.append(
-            InputExample(texts=[f"query: {query}", f"passage: {summary}"])
-        )
+        for item in sampled:
+            examples.append(
+                InputExample(texts=[f"query: {item['query']}", f"passage: {summary}"])
+            )
     random.shuffle(examples)
     return examples
 
