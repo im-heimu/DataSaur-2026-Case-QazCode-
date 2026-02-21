@@ -76,6 +76,8 @@ class ProtocolRetriever:
 
     def _lemmatize(self, text: str) -> str:
         """Lemmatize Russian text for BM25."""
+        if not text:
+            return ""
         words = re.findall(r"[а-яёА-ЯЁa-zA-Z0-9]+", text.lower())
         lemmas = []
         for word in words:
