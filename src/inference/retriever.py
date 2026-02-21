@@ -31,16 +31,16 @@ class ProtocolRetriever:
         norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
         self.embeddings_normalized = self.embeddings / np.maximum(norms, 1e-8)
 
-        # Load summaries for BM25
+        # Load protocol texts for BM25
         logger.info("  Building BM25 index...")
         self.morph = pymorphy3.MorphAnalyzer()
-        summaries = self._load_summaries()
+        protocol_texts = self._load_protocol_texts()
         self.pid_to_idx = {pid: i for i, pid in enumerate(self.protocol_ids)}
 
         # Build lemmatized corpus for TF-IDF (BM25 approximation)
         corpus = []
         for pid in self.protocol_ids:
-            text = summaries.get(pid, "")
+            text = protocol_texts.get(pid, "")
             corpus.append(self._lemmatize(text))
 
         self.tfidf = TfidfVectorizer(
@@ -50,15 +50,15 @@ class ProtocolRetriever:
 
         logger.info("  Retriever ready: {} protocols (hybrid BM25+semantic)", len(self.protocol_ids))
 
-    def _load_summaries(self) -> dict[str, str]:
-        """Load protocol summaries."""
-        summaries = {}
-        if settings.protocol_summaries_path.exists():
-            with open(settings.protocol_summaries_path, "r", encoding="utf-8") as f:
+    def _load_protocol_texts(self) -> dict[str, str]:
+        """Load protocol texts from corpus for BM25 indexing."""
+        texts = {}
+        if settings.corpus_path.exists():
+            with open(settings.corpus_path, "r", encoding="utf-8") as f:
                 for line in f:
                     data = json.loads(line)
-                    summaries[data["protocol_id"]] = data["summary"]
-        return summaries
+                    texts[data["protocol_id"]] = data.get("text", "")
+        return texts
 
     def _lemmatize(self, text: str) -> str:
         """Lemmatize Russian text for BM25."""

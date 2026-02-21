@@ -4,6 +4,9 @@ Uses multilingual-e5-base without fine-tuning (MNR loss degrades performance
 on this task due to semantically overlapping medical protocols).
 Retrieval is boosted by hybrid BM25+semantic search in the inference retriever.
 
+Embeddings are computed from truncated protocol texts (diagnostic sections)
+rather than short GPT-generated summaries, for better semantic matching.
+
 Usage:
     uv run python -m src.training.train_retriever
 """
@@ -18,14 +21,34 @@ from sentence_transformers import SentenceTransformer
 from src.config import settings, setup_logging
 
 
-def load_summaries() -> dict[str, str]:
-    """Load protocol summaries keyed by protocol_id."""
-    summaries = {}
-    with open(settings.protocol_summaries_path, "r", encoding="utf-8") as f:
+def truncate_protocol_text(text: str, max_chars: int = 1500) -> str:
+    """Truncate protocol text to diagnostic sections only.
+
+    Keeps ~1500 chars (fits in 512 tokens for multilingual-e5-base).
+    """
+    earliest_pos = len(text)
+    for marker in settings.truncation_markers:
+        pos = text.find(marker)
+        if pos != -1 and pos < earliest_pos:
+            earliest_pos = pos
+
+    truncated = text[:earliest_pos].strip()
+    if len(truncated) > max_chars:
+        truncated = truncated[:max_chars]
+    return truncated
+
+
+def load_protocol_texts() -> dict[str, str]:
+    """Load truncated protocol texts from corpus for embedding."""
+    texts = {}
+    with open(settings.corpus_path, "r", encoding="utf-8") as f:
         for line in f:
             data = json.loads(line)
-            summaries[data["protocol_id"]] = data["summary"]
-    return summaries
+            pid = data["protocol_id"]
+            text = truncate_protocol_text(data.get("text", ""))
+            if text:
+                texts[pid] = text
+    return texts
 
 
 def load_test_queries() -> list[dict]:
@@ -55,8 +78,8 @@ def main():
     model.max_seq_length = settings.retriever_max_seq_length
 
     logger.info("Loading data...")
-    summaries = load_summaries()
-    logger.info("  Summaries: {}", len(summaries))
+    protocol_texts = load_protocol_texts()
+    logger.info("  Protocol texts: {}", len(protocol_texts))
 
     test_queries = load_test_queries()
     logger.info("  Test queries: {}", len(test_queries))
@@ -67,8 +90,8 @@ def main():
 
     # Pre-compute protocol embeddings
     logger.info("Pre-computing protocol embeddings...")
-    protocol_ids = sorted(summaries.keys())
-    passages = [f"passage: {summaries[pid]}" for pid in protocol_ids]
+    protocol_ids = sorted(protocol_texts.keys())
+    passages = [f"passage: {protocol_texts[pid]}" for pid in protocol_ids]
     embeddings = model.encode(passages, show_progress_bar=True, batch_size=32)
 
     np.save(str(settings.protocol_embeddings_path), embeddings)
