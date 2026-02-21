@@ -52,7 +52,12 @@ class DiagnosisEngine:
         logger.info("DiagnosisEngine ready!")
 
     def diagnose(self, symptoms: str, top_n: int = settings.top_n_diagnoses) -> list[dict]:
-        """Run full diagnosis pipeline."""
+        """Run full diagnosis pipeline.
+
+        Strategy: retrieve top-K protocols, then for each protocol rank its
+        codes by embedding similarity. Return codes from the best protocols
+        first, using code similarity only as tiebreaker within same protocol.
+        """
         if not symptoms or not symptoms.strip():
             return []
 
@@ -65,10 +70,13 @@ class DiagnosisEngine:
         )
         query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
 
-        # Step 3: Collect candidate codes from retrieved protocols
-        candidates = []
+        # Step 3: For each protocol (in retrieval order), rank its codes
+        # by embedding similarity and emit them. This ensures codes from
+        # the top-1 protocol come first.
+        results = []
         seen_codes = set()
-        for rank_idx, (pid, retrieval_score) in enumerate(retrieved):
+
+        for pid, retrieval_score in retrieved:
             pd = self.protocol_data.get(pid)
             if not pd:
                 continue
@@ -77,23 +85,25 @@ class DiagnosisEngine:
             features = pd.get("features", {})
             icd_code_descriptions = features.get("icd_code_descriptions", [])
 
+            # Score codes within this protocol
+            code_scores = []
             for code in icd_codes:
                 if code in seen_codes:
                     continue
-                seen_codes.add(code)
-
-                # Score = retrieval_score * code_similarity
                 code_sim = 0.0
                 if code in self.code_to_idx:
                     cidx = self.code_to_idx[code]
                     code_sim = float(np.dot(query_norm, self.code_embeddings[cidx]))
+                code_scores.append((code, code_sim))
 
-                # Combined score: heavily weight retrieval (protocol match matters most)
-                # Protocol rank penalty: top-1 protocol gets full score, lower ones decay
-                rank_bonus = 1.0 / (1.0 + rank_idx * 0.5)
-                combined_score = retrieval_score * rank_bonus * 0.6 + code_sim * 0.4
+            # Sort by similarity within protocol
+            code_scores.sort(key=lambda x: -x[1])
 
-                # Find code name
+            for code, score in code_scores:
+                if code in seen_codes:
+                    continue
+                seen_codes.add(code)
+
                 code_name = code
                 dist_features = ""
                 for cd in icd_code_descriptions:
@@ -102,32 +112,19 @@ class DiagnosisEngine:
                         dist_features = cd.get("distinguishing_features", "")
                         break
 
-                candidates.append({
-                    "code": code,
-                    "code_name": code_name,
-                    "score": combined_score,
-                    "disease_name": features.get("disease_name", ""),
-                    "dist_features": dist_features,
+                disease = features.get("disease_name", "")
+                explanation = disease if disease else f"Код: {code}"
+                if dist_features:
+                    explanation += f". {dist_features}"
+
+                results.append({
+                    "rank": len(results) + 1,
+                    "diagnosis": code_name,
+                    "icd10_code": code,
+                    "explanation": explanation,
                 })
 
-        if not candidates:
-            return []
-
-        # Step 4: Sort by combined score
-        candidates.sort(key=lambda x: -x["score"])
-
-        # Step 5: Return top-N
-        results = []
-        for rank, cand in enumerate(candidates[:top_n], start=1):
-            explanation = cand["disease_name"] if cand["disease_name"] else f"Код: {cand['code']}"
-            if cand["dist_features"]:
-                explanation += f". {cand['dist_features']}"
-
-            results.append({
-                "rank": rank,
-                "diagnosis": cand["code_name"],
-                "icd10_code": cand["code"],
-                "explanation": explanation,
-            })
+                if len(results) >= top_n:
+                    return results
 
         return results
