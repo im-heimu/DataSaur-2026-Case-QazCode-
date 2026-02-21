@@ -112,11 +112,17 @@ def main():
     setup_logging()
     settings.retriever_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info("Loading model: {}", settings.retriever_model_name)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info("Device: {}", device)
 
-    model = SentenceTransformer(settings.retriever_model_name, device=device)
+    # Resume from checkpoint if available, otherwise load base model
+    checkpoint = settings.retriever_dir / "config.json"
+    if checkpoint.exists():
+        logger.info("Resuming from checkpoint: {}", settings.retriever_dir)
+        model = SentenceTransformer(str(settings.retriever_dir), device=device)
+    else:
+        logger.info("Loading base model: {}", settings.retriever_model_name)
+        model = SentenceTransformer(settings.retriever_model_name, device=device)
     model.max_seq_length = settings.retriever_max_seq_length
 
     logger.info("Loading data...")
