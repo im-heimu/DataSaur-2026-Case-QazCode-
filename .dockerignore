@@ -16,3 +16,6 @@ build
 *.md
 notebooks/
 data/
+corpus/
+.claude/
+evaluate.py

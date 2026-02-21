@@ -217,3 +217,9 @@ __marimo__/
 # Mac OS
 .DS_Store
 **/.DS_Store
+
+# Project-specific
+models/
+data/processed/
+data/evals/
+corpus/

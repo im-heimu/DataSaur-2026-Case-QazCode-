@@ -1,0 +1,303 @@
+"""Step 5: Feature engineering for the LightGBM ranker.
+
+For each (query, protocol, icd_code) triple, computes features for ranking.
+
+Usage:
+    uv run python -m src.training.build_features
+"""
+
+import json
+import pickle
+
+import numpy as np
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm import tqdm
+
+from src.config import (
+    PROTOCOL_FEATURES_PATH,
+    PROTOCOL_SUMMARIES_PATH,
+    SYNTHETIC_TRAINING_PATH,
+    RETRIEVER_DIR,
+    PROTOCOL_EMBEDDINGS_PATH,
+    TRAINING_FEATURES_PATH,
+    TRAINING_LABELS_PATH,
+    TRAINING_GROUPS_PATH,
+    TFIDF_PATH,
+    ICD_FEATURES_PATH,
+    TEST_SET_DIR,
+    PROCESSED_DIR,
+)
+from src.training.text_utils import lemmatize_text, compute_symptom_overlap
+
+
+def load_all_data():
+    """Load all required data files."""
+    # Protocol features
+    pf_map = {}
+    if PROTOCOL_FEATURES_PATH.exists():
+        with open(PROTOCOL_FEATURES_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                pf_map[data["protocol_id"]] = data
+
+    # Summaries
+    summaries = {}
+    with open(PROTOCOL_SUMMARIES_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            data = json.loads(line)
+            summaries[data["protocol_id"]] = data["summary"]
+
+    # Synthetic training data
+    synthetic = []
+    with open(SYNTHETIC_TRAINING_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            synthetic.append(json.loads(line))
+
+    # Test queries
+    test_queries = []
+    if TEST_SET_DIR.exists():
+        for fp in sorted(TEST_SET_DIR.glob("*.json")):
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                test_queries.append(data)
+
+    return pf_map, summaries, synthetic, test_queries
+
+
+def get_icd_chapter(code: str) -> str:
+    """Extract ICD chapter letter from code."""
+    if code and code[0].isalpha():
+        return code[0].upper()
+    return "X"
+
+
+def compute_code_frequency(pf_map: dict) -> dict[str, int]:
+    """Compute how many protocols each code appears in."""
+    freq = {}
+    for pf in pf_map.values():
+        for code in pf.get("icd_codes", []):
+            freq[code] = freq.get(code, 0) + 1
+    return freq
+
+
+def build_icd_descriptions(pf_map: dict) -> dict[str, str]:
+    """Build text descriptions for each ICD code across all protocols."""
+    desc_map = {}
+    for pf in pf_map.values():
+        code_descs = pf.get("icd_code_descriptions", [])
+        for cd in code_descs:
+            code = cd.get("code", "")
+            if not code:
+                continue
+            name = cd.get("name", "")
+            features = cd.get("distinguishing_features", "")
+            text = f"{name}. {features}"
+            if code not in desc_map or len(text) > len(desc_map[code]):
+                desc_map[code] = text
+    return desc_map
+
+
+def main():
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+
+    print("Loading data...")
+    pf_map, summaries, synthetic, test_queries = load_all_data()
+    print(f"  Protocol features: {len(pf_map)}")
+    print(f"  Summaries: {len(summaries)}")
+    print(f"  Synthetic queries: {len(synthetic)}")
+    print(f"  Test queries: {len(test_queries)}")
+
+    # Load retriever model and embeddings
+    print("Loading retriever model...")
+    model = SentenceTransformer(str(RETRIEVER_DIR))
+    protocol_embeddings = np.load(str(PROTOCOL_EMBEDDINGS_PATH))
+    mapping_path = PROTOCOL_EMBEDDINGS_PATH.parent / "protocol_id_mapping.json"
+    with open(mapping_path, "r", encoding="utf-8") as f:
+        protocol_ids = json.load(f)
+    pid_to_idx = {pid: i for i, pid in enumerate(protocol_ids)}
+
+    # Build ICD descriptions and TF-IDF
+    print("Building TF-IDF vectorizer...")
+    icd_descriptions = build_icd_descriptions(pf_map)
+    code_frequency = compute_code_frequency(pf_map)
+
+    # Fit TF-IDF on all descriptions + summaries
+    all_texts = list(icd_descriptions.values()) + list(summaries.values())
+    tfidf = TfidfVectorizer(max_features=10000, ngram_range=(1, 2))
+    tfidf.fit(all_texts)
+
+    # Save artifacts
+    with open(str(TFIDF_PATH), "wb") as f:
+        pickle.dump(tfidf, f)
+
+    with open(str(ICD_FEATURES_PATH), "w", encoding="utf-8") as f:
+        json.dump(icd_descriptions, f, ensure_ascii=False)
+
+    # Pre-compute ICD description embeddings
+    print("Computing ICD code embeddings...")
+    all_codes = sorted(icd_descriptions.keys())
+    code_texts = [f"passage: {icd_descriptions[c]}" for c in all_codes]
+    code_embeddings = model.encode(code_texts, show_progress_bar=True, batch_size=64)
+    code_to_idx = {c: i for i, c in enumerate(all_codes)}
+
+    # Pre-compute ICD TF-IDF vectors
+    code_tfidf = tfidf.transform([icd_descriptions.get(c, c) for c in all_codes])
+
+    # Build training groups: each group is (query, protocol) with all codes as candidates
+    print("Building feature matrix...")
+
+    # Combine synthetic + test queries
+    all_queries = []
+    for item in synthetic:
+        all_queries.append({
+            "query": item["query"],
+            "protocol_id": item["protocol_id"],
+            "target_icd_code": item["target_icd_code"],
+            "all_icd_codes": item["all_icd_codes"],
+            "is_test": False,
+        })
+    for tq in test_queries:
+        all_queries.append({
+            "query": tq["query"],
+            "protocol_id": tq["protocol_id"],
+            "target_icd_code": tq["gt"],
+            "all_icd_codes": tq["icd_codes"],
+            "is_test": True,
+        })
+
+    # Encode all queries
+    print(f"Encoding {len(all_queries)} queries...")
+    query_texts = [f"query: {q['query']}" for q in all_queries]
+
+    # Batch encode
+    batch_size = 256
+    query_embeddings = model.encode(query_texts, show_progress_bar=True, batch_size=batch_size)
+
+    # TF-IDF for queries
+    query_tfidf = tfidf.transform([q["query"] for q in all_queries])
+
+    # Build features
+    features_list = []
+    labels_list = []
+    groups_list = []
+
+    icd_chapters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    chapter_to_idx = {c: i for i, c in enumerate(icd_chapters)}
+
+    for i, q in enumerate(tqdm(all_queries, desc="Building features")):
+        pid = q["protocol_id"]
+        icd_codes = q["all_icd_codes"]
+        target = q["target_icd_code"]
+
+        if pid not in pid_to_idx:
+            continue
+
+        # Protocol retrieval score
+        proto_idx = pid_to_idx[pid]
+        retrieval_score = float(np.dot(protocol_embeddings[proto_idx], query_embeddings[i]))
+
+        pf = pf_map.get(pid, {})
+        symptoms = pf.get("symptoms", [])
+        body_system = pf.get("body_system", "")
+        n_codes = len(icd_codes)
+
+        group_size = 0
+        for code in icd_codes:
+            # Label: 1 if target, 0 otherwise
+            label = 1 if code == target else 0
+
+            # Feature vector
+            feat = []
+
+            # 1. Retrieval score (query <-> protocol)
+            feat.append(retrieval_score)
+
+            # 2. TF-IDF similarity (query <-> ICD description)
+            if code in code_to_idx:
+                cidx = code_to_idx[code]
+                tfidf_sim = float(cosine_similarity(query_tfidf[i:i+1], code_tfidf[cidx:cidx+1])[0, 0])
+            else:
+                tfidf_sim = 0.0
+            feat.append(tfidf_sim)
+
+            # 3. Symptom overlap
+            overlap = compute_symptom_overlap(q["query"], symptoms)
+            feat.append(overlap)
+
+            # 4. Query <-> ICD code embedding similarity
+            if code in code_to_idx:
+                cidx = code_to_idx[code]
+                emb_sim = float(np.dot(query_embeddings[i], code_embeddings[cidx]))
+            else:
+                emb_sim = 0.0
+            feat.append(emb_sim)
+
+            # 5. Protocol rank (1.0 for exact match, normalized)
+            feat.append(1.0)  # During training, protocol is always the correct one
+
+            # 6. Number of codes in protocol (normalized)
+            feat.append(n_codes / 100.0)
+
+            # 7. ICD chapter (numeric)
+            chapter = get_icd_chapter(code)
+            feat.append(chapter_to_idx.get(chapter, 25))
+
+            # 8. Body system match (simplified: always 1 for same protocol)
+            feat.append(1.0)
+
+            # 9. Code corpus frequency
+            feat.append(code_frequency.get(code, 0))
+
+            # 10. Distinguishing features similarity
+            code_descs = pf.get("icd_code_descriptions", [])
+            dist_feat = ""
+            for cd in code_descs:
+                if cd.get("code") == code:
+                    dist_feat = cd.get("distinguishing_features", "")
+                    break
+            if dist_feat:
+                dist_vec = tfidf.transform([dist_feat])
+                dist_sim = float(cosine_similarity(query_tfidf[i:i+1], dist_vec)[0, 0])
+            else:
+                dist_sim = 0.0
+            feat.append(dist_sim)
+
+            features_list.append(feat)
+            labels_list.append(label)
+            group_size += 1
+
+        if group_size > 0:
+            groups_list.append(group_size)
+
+    features = np.array(features_list, dtype=np.float32)
+    labels = np.array(labels_list, dtype=np.float32)
+    groups = np.array(groups_list, dtype=np.int32)
+
+    print(f"\nFeatures shape: {features.shape}")
+    print(f"Labels: {labels.sum():.0f} positives / {len(labels)} total")
+    print(f"Groups: {len(groups)}")
+
+    np.savez(str(TRAINING_FEATURES_PATH), features=features)
+    np.save(str(TRAINING_LABELS_PATH), labels)
+    np.save(str(TRAINING_GROUPS_PATH), groups)
+
+    # Also save train/val split info
+    split_path = PROCESSED_DIR / "query_is_test.npy"
+    is_test_flags = []
+    for q in all_queries:
+        if q["protocol_id"] not in pid_to_idx:
+            continue
+        n_codes = len(q["all_icd_codes"])
+        is_test_flags.extend([q["is_test"]] * n_codes)
+    np.save(str(split_path), np.array(is_test_flags, dtype=bool))
+
+    print(f"\nSaved to:")
+    print(f"  {TRAINING_FEATURES_PATH}")
+    print(f"  {TRAINING_LABELS_PATH}")
+    print(f"  {TRAINING_GROUPS_PATH}")
+
+
+if __name__ == "__main__":
+    main()
