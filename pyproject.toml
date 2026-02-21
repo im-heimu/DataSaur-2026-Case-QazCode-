@@ -27,6 +27,7 @@ dependencies = [
     "lo",
     "loguru>=0.7.3",
     "datasets>=4.5.0",
+    "accelerate>=1.12.0",
 ]
 
 [dependency-groups]
