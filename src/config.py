@@ -37,9 +37,11 @@ class Settings(BaseSettings):
     # ── Retriever ───────────────────────────────────────────────
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
-    retriever_epochs: int = 3
-    retriever_batch_size: int = 32
-    retriever_lr: float = 2e-6
+    retriever_epochs: int = 5
+    retriever_batch_size: int = 64
+    retriever_lr: float = 2e-5
+    retriever_max_per_protocol: int = 20
+    retriever_hard_negatives_per_positive: int = 2
 
     # ── Ranker ──────────────────────────────────────────────────
     ranker_learning_rate: float = 0.05
@@ -49,9 +51,19 @@ class Settings(BaseSettings):
     ranker_reg_alpha: float = 0.1
     ranker_reg_lambda: float = 0.1
 
+    # ── Cross-encoder reranker ────────────────────────────────────
+    reranker_model_name: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    reranker_top_k_input: int = 50   # retrieve this many for reranking
+    reranker_top_k_output: int = 10  # keep this many after reranking
+
     # ── Inference ───────────────────────────────────────────────
-    top_k_protocols: int = 10
+    top_k_protocols: int = 20
     top_n_diagnoses: int = 3
+
+    # ── Code ranking weights ──────────────────────────────────
+    w_code_embedding: float = 0.3
+    w_code_tfidf: float = 0.2
+    w_protocol_rank: float = 0.5
 
     # ── Text processing ─────────────────────────────────────────
     truncation_markers: list[str] = [

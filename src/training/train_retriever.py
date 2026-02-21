@@ -57,11 +57,31 @@ def load_protocol_passages() -> dict[str, str]:
             parts.append(feat["disease_name"])
         symptoms = feat.get("symptoms", [])
         if symptoms:
-            parts.append("Симптомы: " + ", ".join(symptoms[:15]))
+            parts.append("Симптомы: " + ", ".join(symptoms))
+        # Add diagnostic criteria if available
+        if feat.get("diagnostic_criteria"):
+            dc = feat["diagnostic_criteria"]
+            if isinstance(dc, list):
+                parts.append("Диагностические критерии: " + "; ".join(dc))
+            elif isinstance(dc, str):
+                parts.append("Диагностические критерии: " + dc)
+        # Add distinguishing features from ICD code descriptions
+        icd_descs = feat.get("icd_code_descriptions", [])
+        if icd_descs:
+            dist_parts = []
+            for cd in icd_descs:
+                name = cd.get("name", "")
+                dist = cd.get("distinguishing_features", "")
+                if name and dist:
+                    dist_parts.append(f"{name}: {dist}")
+                elif name:
+                    dist_parts.append(name)
+            if dist_parts:
+                parts.append("Коды: " + "; ".join(dist_parts))
         if pid in summaries:
             parts.append(summaries[pid])
         if parts:
-            passages[pid] = "\n".join(parts)[:1500]
+            passages[pid] = "\n".join(parts)[:2500]
 
     return passages
 
@@ -107,16 +127,33 @@ def build_icd_chapter_map(passages: dict[str, str]) -> dict[str, list[str]]:
     return dict(chapters)
 
 
+def build_body_system_map(passages: dict[str, str]) -> dict[str, list[str]]:
+    """Group protocol IDs by body system for multi-level hard negatives."""
+    systems = defaultdict(list)
+    if settings.protocol_features_path.exists():
+        with open(settings.protocol_features_path, "r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                pid = data.get("protocol_id")
+                if pid and pid in passages:
+                    bs = data.get("body_system", "unknown")
+                    if bs:
+                        systems[bs].append(pid)
+    return dict(systems)
+
+
 def build_training_examples(
     synthetic: list[dict],
     passages: dict[str, str],
     chapter_map: dict[str, list[str]],
-    max_per_protocol: int = 8,
+    body_system_map: dict[str, list[str]],
+    max_per_protocol: int = 20,
+    hard_negatives_per_positive: int = 2,
 ) -> list[InputExample]:
     """Build training examples with CosineSimilarityLoss.
 
     Positive pairs: (query, correct_protocol_passage) label=1.0
-    Hard negative pairs: (query, same_chapter_protocol_passage) label=0.0
+    Hard negative pairs: multi-level negatives (same chapter + same body system)
     """
     # Group synthetic by protocol_id, cap per protocol
     by_protocol = defaultdict(list)
@@ -131,6 +168,12 @@ def build_training_examples(
         for pid in pids:
             pid_to_chapter[pid] = chapter
 
+    # Build pid -> body_system mapping
+    pid_to_system = {}
+    for system, pids in body_system_map.items():
+        for pid in pids:
+            pid_to_system[pid] = system
+
     examples = []
     all_pids = list(passages.keys())
 
@@ -138,12 +181,12 @@ def build_training_examples(
         # Cap queries per protocol
         sampled = random.sample(queries, min(len(queries), max_per_protocol))
         chapter = pid_to_chapter.get(pid)
+        system = pid_to_system.get(pid)
 
-        # Same-chapter negatives (hard) or random if no chapter
-        chapter_pids = chapter_map.get(chapter, all_pids) if chapter else all_pids
-        neg_candidates = [p for p in chapter_pids if p != pid]
-        if not neg_candidates:
-            neg_candidates = [p for p in all_pids if p != pid]
+        # Multi-level negative candidates
+        chapter_pids = [p for p in chapter_map.get(chapter, []) if p != pid] if chapter else []
+        system_pids = [p for p in body_system_map.get(system, []) if p != pid] if system else []
+        random_pids = [p for p in all_pids if p != pid]
 
         for query in sampled:
             q_text = f"query: {query}"
@@ -152,10 +195,17 @@ def build_training_examples(
             # Positive pair
             examples.append(InputExample(texts=[q_text, pos_text], label=1.0))
 
-            # One hard negative per positive
-            neg_pid = random.choice(neg_candidates)
-            neg_text = f"passage: {passages[neg_pid]}"
-            examples.append(InputExample(texts=[q_text, neg_text], label=0.0))
+            # Multiple hard negatives per positive
+            for neg_i in range(hard_negatives_per_positive):
+                # Alternate between chapter-level and system-level negatives
+                if neg_i == 0 and chapter_pids:
+                    neg_pid = random.choice(chapter_pids)
+                elif neg_i == 1 and system_pids:
+                    neg_pid = random.choice(system_pids)
+                else:
+                    neg_pid = random.choice(random_pids)
+                neg_text = f"passage: {passages[neg_pid]}"
+                examples.append(InputExample(texts=[q_text, neg_text], label=0.0))
 
     random.shuffle(examples)
     return examples
@@ -223,13 +273,21 @@ def main():
     chapter_map = build_icd_chapter_map(passages)
     logger.info("  ICD chapters: {}", len(chapter_map))
 
+    body_system_map = build_body_system_map(passages)
+    logger.info("  Body systems: {}", len(body_system_map))
+
     # Build training examples
     logger.info("Building training examples...")
-    examples = build_training_examples(synthetic, passages, chapter_map, max_per_protocol=8)
+    examples = build_training_examples(
+        synthetic, passages, chapter_map, body_system_map,
+        max_per_protocol=settings.retriever_max_per_protocol,
+        hard_negatives_per_positive=settings.retriever_hard_negatives_per_positive,
+    )
     logger.info("  Training examples: {} (pos+neg pairs)", len(examples))
 
     # Setup training
-    train_dataloader = DataLoader(examples, shuffle=True, batch_size=64)
+    train_batch_size = settings.retriever_batch_size
+    train_dataloader = DataLoader(examples, shuffle=True, batch_size=train_batch_size)
     train_loss = losses.CosineSimilarityLoss(model)
 
     protocol_ids = sorted(passages.keys())
@@ -240,16 +298,16 @@ def main():
     evaluator(model, epoch=-1, steps=0)
 
     # Train
-    epochs = 3
+    epochs = settings.retriever_epochs
     warmup_steps = int(len(train_dataloader) * 0.1)
-    logger.info("Training: {} epochs, {} batches/epoch, warmup={}",
-                epochs, len(train_dataloader), warmup_steps)
+    logger.info("Training: {} epochs, {} batches/epoch, batch_size={}, warmup={}",
+                epochs, len(train_dataloader), train_batch_size, warmup_steps)
 
     model.fit(
         train_objectives=[(train_dataloader, train_loss)],
         epochs=epochs,
         warmup_steps=warmup_steps,
-        optimizer_params={"lr": 2e-5},
+        optimizer_params={"lr": settings.retriever_lr},
         output_path=str(settings.retriever_dir),
         evaluator=evaluator,
         evaluation_steps=len(train_dataloader) // 3,
