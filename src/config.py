@@ -29,16 +29,16 @@ class Settings(BaseSettings):
     project_root: Path = _PROJECT_ROOT
 
     # ── GPT-OSS API (offline data prep only) ────────────────────
-    gpt_oss_url: str = "https://hub.qazcode.ai/v1"
+    gpt_oss_url: str = "https://api.openai.com/v1"
     gpt_oss_key: str = Field(default="")
-    gpt_oss_model: str = "oss-120b"
+    gpt_oss_model: str = "gpt-4.1-mini"
     gpt_oss_concurrency: int = 100
 
     # ── Retriever ───────────────────────────────────────────────
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
     retriever_epochs: int = 3
-    retriever_batch_size: int = 16
+    retriever_batch_size: int = 128
     retriever_lr: float = 2e-5
 
     # ── Ranker ──────────────────────────────────────────────────
