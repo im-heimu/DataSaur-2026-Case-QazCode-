@@ -12,6 +12,7 @@ import random
 
 import numpy as np
 import torch
+from loguru import logger
 from sentence_transformers import (
     SentenceTransformer,
     InputExample,
@@ -20,24 +21,13 @@ from sentence_transformers import (
 )
 from torch.utils.data import DataLoader
 
-from src.config import (
-    PROTOCOL_SUMMARIES_PATH,
-    SYNTHETIC_TRAINING_PATH,
-    RETRIEVER_DIR,
-    RETRIEVER_MODEL_NAME,
-    RETRIEVER_MAX_SEQ_LENGTH,
-    RETRIEVER_EPOCHS,
-    RETRIEVER_BATCH_SIZE,
-    RETRIEVER_LR,
-    PROTOCOL_EMBEDDINGS_PATH,
-    TEST_SET_DIR,
-)
+from src.config import settings, setup_logging
 
 
 def load_summaries() -> dict[str, str]:
     """Load protocol summaries keyed by protocol_id."""
     summaries = {}
-    with open(PROTOCOL_SUMMARIES_PATH, "r", encoding="utf-8") as f:
+    with open(settings.protocol_summaries_path, "r", encoding="utf-8") as f:
         for line in f:
             data = json.loads(line)
             summaries[data["protocol_id"]] = data["summary"]
@@ -47,7 +37,7 @@ def load_summaries() -> dict[str, str]:
 def load_synthetic() -> list[dict]:
     """Load synthetic training data."""
     data = []
-    with open(SYNTHETIC_TRAINING_PATH, "r", encoding="utf-8") as f:
+    with open(settings.synthetic_training_path, "r", encoding="utf-8") as f:
         for line in f:
             data.append(json.loads(line))
     return data
@@ -56,8 +46,8 @@ def load_synthetic() -> list[dict]:
 def load_test_queries() -> list[dict]:
     """Load test set queries for validation."""
     queries = []
-    if TEST_SET_DIR.exists():
-        for fp in sorted(TEST_SET_DIR.glob("*.json")):
+    if settings.test_set_dir.exists():
+        for fp in sorted(settings.test_set_dir.glob("*.json")):
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 queries.append({
@@ -119,35 +109,36 @@ def build_evaluator(
 
 
 def main():
-    RETRIEVER_DIR.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.retriever_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading model: {RETRIEVER_MODEL_NAME}")
+    logger.info("Loading model: {}", settings.retriever_model_name)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
+    logger.info("Device: {}", device)
 
-    model = SentenceTransformer(RETRIEVER_MODEL_NAME, device=device)
-    model.max_seq_length = RETRIEVER_MAX_SEQ_LENGTH
+    model = SentenceTransformer(settings.retriever_model_name, device=device)
+    model.max_seq_length = settings.retriever_max_seq_length
 
-    print("Loading data...")
+    logger.info("Loading data...")
     summaries = load_summaries()
-    print(f"  Summaries: {len(summaries)}")
+    logger.info("  Summaries: {}", len(summaries))
 
     synthetic = load_synthetic()
-    print(f"  Synthetic queries: {len(synthetic)}")
+    logger.info("  Synthetic queries: {}", len(synthetic))
 
     test_queries = load_test_queries()
-    print(f"  Test queries: {len(test_queries)}")
+    logger.info("  Test queries: {}", len(test_queries))
 
     # Build training data
     train_examples = build_training_examples(synthetic, summaries)
-    print(f"  Training pairs: {len(train_examples)}")
+    logger.info("  Training pairs: {}", len(train_examples))
 
     if not train_examples:
-        print("No training data! Run data prep steps first.")
+        logger.error("No training data! Run data prep steps first.")
         return
 
     train_dataloader = DataLoader(
-        train_examples, shuffle=True, batch_size=RETRIEVER_BATCH_SIZE
+        train_examples, shuffle=True, batch_size=settings.retriever_batch_size
     )
     train_loss = losses.MultipleNegativesRankingLoss(model)
 
@@ -155,45 +146,45 @@ def main():
     evaluator = build_evaluator(test_queries, summaries)
 
     # Train
-    warmup_steps = int(len(train_dataloader) * RETRIEVER_EPOCHS * 0.1)
-    print(f"\nTraining for {RETRIEVER_EPOCHS} epochs, {len(train_dataloader)} steps/epoch")
-    print(f"Warmup steps: {warmup_steps}")
+    warmup_steps = int(len(train_dataloader) * settings.retriever_epochs * 0.1)
+    logger.info("Training for {} epochs, {} steps/epoch", settings.retriever_epochs, len(train_dataloader))
+    logger.info("Warmup steps: {}", warmup_steps)
 
     model.fit(
         train_objectives=[(train_dataloader, train_loss)],
-        epochs=RETRIEVER_EPOCHS,
+        epochs=settings.retriever_epochs,
         evaluator=evaluator,
         evaluation_steps=len(train_dataloader) // 2 if evaluator else 0,
         warmup_steps=warmup_steps,
-        output_path=str(RETRIEVER_DIR),
-        optimizer_params={"lr": RETRIEVER_LR},
+        output_path=str(settings.retriever_dir),
+        optimizer_params={"lr": settings.retriever_lr},
         show_progress_bar=True,
         save_best_model=True if evaluator else False,
     )
 
-    print(f"\nModel saved to {RETRIEVER_DIR}")
+    logger.info("Model saved to {}", settings.retriever_dir)
 
     # Pre-compute protocol embeddings
-    print("Pre-computing protocol embeddings...")
-    model = SentenceTransformer(str(RETRIEVER_DIR), device=device)
+    logger.info("Pre-computing protocol embeddings...")
+    model = SentenceTransformer(str(settings.retriever_dir), device=device)
 
     protocol_ids = sorted(summaries.keys())
     passages = [f"passage: {summaries[pid]}" for pid in protocol_ids]
     embeddings = model.encode(passages, show_progress_bar=True, batch_size=32)
 
-    np.save(str(PROTOCOL_EMBEDDINGS_PATH), embeddings)
+    np.save(str(settings.protocol_embeddings_path), embeddings)
 
     # Save protocol ID mapping
-    mapping_path = PROTOCOL_EMBEDDINGS_PATH.parent / "protocol_id_mapping.json"
+    mapping_path = settings.protocol_embeddings_path.parent / "protocol_id_mapping.json"
     with open(mapping_path, "w", encoding="utf-8") as f:
         json.dump(protocol_ids, f)
 
-    print(f"Embeddings shape: {embeddings.shape}")
-    print(f"Saved to {PROTOCOL_EMBEDDINGS_PATH}")
+    logger.info("Embeddings shape: {}", embeddings.shape)
+    logger.info("Saved to {}", settings.protocol_embeddings_path)
 
     # Quick recall@10 evaluation
     if test_queries:
-        print("\n--- Retrieval Recall@10 on test set ---")
+        logger.info("--- Retrieval Recall@10 on test set ---")
         query_texts = [f"query: {tq['query']}" for tq in test_queries]
         query_embs = model.encode(query_texts, show_progress_bar=True, batch_size=32)
 
@@ -206,7 +197,7 @@ def main():
                 hits += 1
 
         recall_at_10 = hits / len(test_queries)
-        print(f"Recall@10: {recall_at_10:.4f} ({hits}/{len(test_queries)})")
+        logger.info("Recall@10: {:.4f} ({}/{})", recall_at_10, hits, len(test_queries))
 
 
 if __name__ == "__main__":

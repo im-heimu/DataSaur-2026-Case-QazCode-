@@ -3,8 +3,9 @@
 import json
 
 import numpy as np
+from loguru import logger
 
-from src.config import PROTOCOL_DATA_PATH, TOP_K_PROTOCOLS, TOP_N_DIAGNOSES
+from src.config import settings
 from src.inference.feature_builder import FeatureBuilder
 from src.inference.ranker import ICDRanker
 from src.inference.retriever import ProtocolRetriever
@@ -14,7 +15,7 @@ class DiagnosisEngine:
     """Full inference pipeline: query -> top-N ICD-10 diagnoses."""
 
     def __init__(self):
-        print("Initializing DiagnosisEngine...")
+        logger.info("Initializing DiagnosisEngine...")
 
         # Load components
         self.retriever = ProtocolRetriever()
@@ -22,8 +23,8 @@ class DiagnosisEngine:
         self.feature_builder = FeatureBuilder(self.retriever.model)
 
         # Load protocol data
-        print("  Loading protocol data...")
-        with open(PROTOCOL_DATA_PATH, "r", encoding="utf-8") as f:
+        logger.info("  Loading protocol data...")
+        with open(settings.protocol_data_path, "r", encoding="utf-8") as f:
             self.protocol_data = json.load(f)
 
         # Compute code frequency for feature builder
@@ -33,9 +34,9 @@ class DiagnosisEngine:
                 code_freq[code] = code_freq.get(code, 0) + 1
         self.feature_builder.set_code_frequency(code_freq)
 
-        print("DiagnosisEngine ready!")
+        logger.info("DiagnosisEngine ready!")
 
-    def diagnose(self, symptoms: str, top_n: int = TOP_N_DIAGNOSES) -> list[dict]:
+    def diagnose(self, symptoms: str, top_n: int = settings.top_n_diagnoses) -> list[dict]:
         """Run full diagnosis pipeline.
 
         Args:
@@ -49,7 +50,7 @@ class DiagnosisEngine:
             return []
 
         # Step 1: Retrieve top-K protocols
-        retrieved = self.retriever.retrieve(symptoms, top_k=TOP_K_PROTOCOLS)
+        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
 
         # Step 2: Get query embedding for features
         query_embedding = self.retriever.model.encode(

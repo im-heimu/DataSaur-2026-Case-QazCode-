@@ -1,71 +1,188 @@
-"""Configuration for the medical diagnosis system."""
+"""Configuration for the medical diagnosis system.
 
-import os
+All settings are loaded from environment variables and .env file.
+Usage: ``from src.config import settings``
+"""
+
+from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-# Project root
-PROJECT_ROOT = Path(__file__).parent.parent
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Data paths
-CORPUS_PATH = PROJECT_ROOT / "corpus" / "protocols_corpus.jsonl"
-TEST_SET_DIR = PROJECT_ROOT / "data" / "test_set"
-PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
+from loguru import logger
 
-# Model paths
-MODELS_DIR = PROJECT_ROOT / "models"
-RETRIEVER_DIR = MODELS_DIR / "retriever"
-PROTOCOL_EMBEDDINGS_PATH = MODELS_DIR / "protocol_embeddings.npy"
-PROTOCOL_DATA_PATH = MODELS_DIR / "protocol_data.json"
-ICD_FEATURES_PATH = MODELS_DIR / "icd_features.json"
-RANKER_PATH = MODELS_DIR / "ranker.lgb"
-TFIDF_PATH = MODELS_DIR / "tfidf_vectorizer.pkl"
+import sys
 
-# Processed data paths
-PROTOCOL_FEATURES_PATH = PROCESSED_DIR / "protocol_features.jsonl"
-SYNTHETIC_TRAINING_PATH = PROCESSED_DIR / "synthetic_training.jsonl"
-PROTOCOL_SUMMARIES_PATH = PROCESSED_DIR / "protocol_summaries.jsonl"
-TRAINING_FEATURES_PATH = PROCESSED_DIR / "training_features.npz"
-TRAINING_LABELS_PATH = PROCESSED_DIR / "training_labels.npy"
-TRAINING_GROUPS_PATH = PROCESSED_DIR / "training_groups.npy"
+_PROJECT_ROOT = Path(__file__).parent.parent
 
-# GPT-OSS API config (offline data prep only)
-GPT_OSS_URL = os.getenv("GPT_OSS_URL", "https://hub.qazcode.ai/v1")
-GPT_OSS_KEY = os.environ["GPT_OSS_KEY"]
-GPT_OSS_MODEL = os.getenv("GPT_OSS_MODEL", "oss-120b")
-GPT_OSS_CONCURRENCY = 100
 
-# Retriever config
-RETRIEVER_MODEL_NAME = "intfloat/multilingual-e5-base"
-RETRIEVER_MAX_SEQ_LENGTH = 512
-RETRIEVER_EPOCHS = 3
-RETRIEVER_BATCH_SIZE = 16
-RETRIEVER_LR = 2e-5
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=str(_PROJECT_ROOT / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
-# Ranker config
-RANKER_PARAMS = {
-    "objective": "lambdarank",
-    "metric": "ndcg",
-    "ndcg_eval_at": [1, 3],
-    "learning_rate": 0.05,
-    "num_leaves": 31,
-    "min_child_samples": 5,
-    "n_estimators": 500,
-    "reg_alpha": 0.1,
-    "reg_lambda": 0.1,
-    "verbose": -1,
-}
+    # ── Paths (not from env, computed) ──────────────────────────
+    project_root: Path = _PROJECT_ROOT
 
-# Inference config
-TOP_K_PROTOCOLS = 10
-TOP_N_DIAGNOSES = 3
+    # ── GPT-OSS API (offline data prep only) ────────────────────
+    gpt_oss_url: str = "https://hub.qazcode.ai/v1"
+    gpt_oss_key: str = Field(default="")
+    gpt_oss_model: str = "oss-120b"
+    gpt_oss_concurrency: int = 100
 
-# Text processing: markers for truncating protocol text
-TRUNCATION_MARKERS = [
-    "ТАКТИКА ЛЕЧЕНИЯ",
-    "МЕДИКАМЕНТОЗНОЕ ЛЕЧЕНИЕ",
-    "ОРГАНИЗАЦИОННЫЕ АСПЕКТЫ",
-    "ПОКАЗАНИЯ ДЛЯ ГОСПИТАЛИЗАЦИИ",
-    "Тактика лечения",
-    "Медикаментозное лечение",
-    "Немедикаментозное лечение",
-]
+    # ── Retriever ───────────────────────────────────────────────
+    retriever_model_name: str = "intfloat/multilingual-e5-base"
+    retriever_max_seq_length: int = 512
+    retriever_epochs: int = 3
+    retriever_batch_size: int = 16
+    retriever_lr: float = 2e-5
+
+    # ── Ranker ──────────────────────────────────────────────────
+    ranker_learning_rate: float = 0.05
+    ranker_num_leaves: int = 31
+    ranker_min_child_samples: int = 5
+    ranker_n_estimators: int = 500
+    ranker_reg_alpha: float = 0.1
+    ranker_reg_lambda: float = 0.1
+
+    # ── Inference ───────────────────────────────────────────────
+    top_k_protocols: int = 10
+    top_n_diagnoses: int = 3
+
+    # ── Text processing ─────────────────────────────────────────
+    truncation_markers: list[str] = [
+        "ТАКТИКА ЛЕЧЕНИЯ",
+        "МЕДИКАМЕНТОЗНОЕ ЛЕЧЕНИЕ",
+        "ОРГАНИЗАЦИОННЫЕ АСПЕКТЫ",
+        "ПОКАЗАНИЯ ДЛЯ ГОСПИТАЛИЗАЦИИ",
+        "Тактика лечения",
+        "Медикаментозное лечение",
+        "Немедикаментозное лечение",
+    ]
+
+    # ── Computed paths ──────────────────────────────────────────
+    @property
+    def corpus_path(self) -> Path:
+        return self.project_root / "corpus" / "protocols_corpus.jsonl"
+
+    @property
+    def test_set_dir(self) -> Path:
+        return self.project_root / "data" / "test_set"
+
+    @property
+    def processed_dir(self) -> Path:
+        return self.project_root / "data" / "processed"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.project_root / "models"
+
+    # Model paths
+    @property
+    def retriever_dir(self) -> Path:
+        return self.models_dir / "retriever"
+
+    @property
+    def protocol_embeddings_path(self) -> Path:
+        return self.models_dir / "protocol_embeddings.npy"
+
+    @property
+    def protocol_data_path(self) -> Path:
+        return self.models_dir / "protocol_data.json"
+
+    @property
+    def icd_features_path(self) -> Path:
+        return self.models_dir / "icd_features.json"
+
+    @property
+    def ranker_path(self) -> Path:
+        return self.models_dir / "ranker.lgb"
+
+    @property
+    def tfidf_path(self) -> Path:
+        return self.models_dir / "tfidf_vectorizer.pkl"
+
+    # Processed data paths
+    @property
+    def protocol_features_path(self) -> Path:
+        return self.processed_dir / "protocol_features.jsonl"
+
+    @property
+    def synthetic_training_path(self) -> Path:
+        return self.processed_dir / "synthetic_training.jsonl"
+
+    @property
+    def protocol_summaries_path(self) -> Path:
+        return self.processed_dir / "protocol_summaries.jsonl"
+
+    @property
+    def training_features_path(self) -> Path:
+        return self.processed_dir / "training_features.npz"
+
+    @property
+    def training_labels_path(self) -> Path:
+        return self.processed_dir / "training_labels.npy"
+
+    @property
+    def training_groups_path(self) -> Path:
+        return self.processed_dir / "training_groups.npy"
+
+    # Ranker params dict for LightGBM
+    @property
+    def ranker_params(self) -> dict:
+        return {
+            "objective": "lambdarank",
+            "metric": "ndcg",
+            "ndcg_eval_at": [1, 3],
+            "learning_rate": self.ranker_learning_rate,
+            "num_leaves": self.ranker_num_leaves,
+            "min_child_samples": self.ranker_min_child_samples,
+            "n_estimators": self.ranker_n_estimators,
+            "reg_alpha": self.ranker_reg_alpha,
+            "reg_lambda": self.ranker_reg_lambda,
+            "verbose": -1,
+        }
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
+
+
+def setup_logging(level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO") -> None:
+    logger.remove()
+
+    logger.add(
+        sys.stdout,
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+            "<level>{message}</level>"
+        ),
+        level=level,
+        colorize=True,
+        backtrace=True,
+        diagnose=True,
+    )
+
+    logger.add(
+        f"logs/{level.lower()}.log",
+        level=level,
+        rotation="100 MB",
+        retention="1 month",
+        compression="zip",
+        format=(
+            "{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | "
+            "{name}:{function}:{line} | {message}"
+        ),
+    )
+
+    logger.info(f"Logging configured with level: {level}")

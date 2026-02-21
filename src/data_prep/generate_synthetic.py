@@ -10,18 +10,11 @@ Usage:
 import asyncio
 import json
 
+from loguru import logger
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
-from src.config import (
-    GPT_OSS_CONCURRENCY,
-    GPT_OSS_KEY,
-    GPT_OSS_MODEL,
-    GPT_OSS_URL,
-    PROTOCOL_FEATURES_PATH,
-    SYNTHETIC_TRAINING_PATH,
-    TEST_SET_DIR,
-)
+from src.config import settings, setup_logging
 
 
 SYSTEM_PROMPT = """Ты — пациент, который описывает свои жалобы врачу. Пиши естественным разговорным русским языком от первого лица."""
@@ -45,8 +38,8 @@ USER_PROMPT_TEMPLATE = """Сгенерируй {n} вариантов жалоб
 def load_test_protocol_ids() -> set[str]:
     """Load protocol IDs from the test set."""
     ids = set()
-    if TEST_SET_DIR.exists():
-        for f in TEST_SET_DIR.glob("*.json"):
+    if settings.test_set_dir.exists():
+        for f in settings.test_set_dir.glob("*.json"):
             with open(f, "r", encoding="utf-8") as fp:
                 data = json.load(fp)
                 ids.add(data["protocol_id"])
@@ -56,7 +49,7 @@ def load_test_protocol_ids() -> set[str]:
 def load_protocol_features() -> list[dict]:
     """Load extracted protocol features."""
     features = []
-    with open(PROTOCOL_FEATURES_PATH, "r", encoding="utf-8") as f:
+    with open(settings.protocol_features_path, "r", encoding="utf-8") as f:
         for line in f:
             features.append(json.loads(line))
     return features
@@ -85,7 +78,7 @@ async def generate_queries(
     for attempt in range(max_retries):
         try:
             response = await client.chat.completions.create(
-                model=GPT_OSS_MODEL,
+                model=settings.gpt_oss_model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -114,29 +107,30 @@ async def generate_queries(
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** (attempt + 1))
                 continue
-            print(f"  API error: {e}")
+            logger.error("API error: {}", e)
             return None
 
 
 async def main():
-    SYNTHETIC_TRAINING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.synthetic_training_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load already generated pairs for resumability
     processed_pairs = set()
-    if SYNTHETIC_TRAINING_PATH.exists():
-        with open(SYNTHETIC_TRAINING_PATH, "r", encoding="utf-8") as f:
+    if settings.synthetic_training_path.exists():
+        with open(settings.synthetic_training_path, "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 processed_pairs.add(
                     (data["protocol_id"], data["target_icd_code"])
                 )
-        print(f"Resuming: {len(processed_pairs)} pairs already processed")
+        logger.info("Resuming: {} pairs already processed", len(processed_pairs))
 
     test_protocol_ids = load_test_protocol_ids()
-    print(f"Test set protocol IDs: {len(test_protocol_ids)}")
+    logger.info("Test set protocol IDs: {}", len(test_protocol_ids))
 
     protocol_features = load_protocol_features()
-    print(f"Protocols with features: {len(protocol_features)}")
+    logger.info("Protocols with features: {}", len(protocol_features))
 
     # Build work items
     all_pairs = []
@@ -155,20 +149,20 @@ async def main():
                 continue
             all_pairs.append((pf, code, code_info.get(code, {}), is_test))
 
-    print(f"Remaining (protocol, code) pairs: {len(all_pairs)}")
+    logger.info("Remaining (protocol, code) pairs: {}", len(all_pairs))
 
     if not all_pairs:
-        print("All pairs already processed!")
+        logger.info("All pairs already processed!")
         return
 
-    client = AsyncOpenAI(base_url=GPT_OSS_URL, api_key=GPT_OSS_KEY)
-    semaphore = asyncio.Semaphore(GPT_OSS_CONCURRENCY)
+    client = AsyncOpenAI(base_url=settings.gpt_oss_url, api_key=settings.gpt_oss_key)
+    semaphore = asyncio.Semaphore(settings.gpt_oss_concurrency)
 
     total_generated = 0
     total_pairs = 0
     lock = asyncio.Lock()
 
-    out_f = open(SYNTHETIC_TRAINING_PATH, "a", encoding="utf-8")
+    out_f = open(settings.synthetic_training_path, "a", encoding="utf-8")
 
     async def process_one(pf: dict, code: str, ci: dict, is_test: bool):
         nonlocal total_generated, total_pairs
@@ -204,8 +198,8 @@ async def main():
     out_f.close()
     await client.close()
 
-    print(f"\nDone! Pairs processed: {total_pairs}, Queries generated: {total_generated}")
-    print(f"Output: {SYNTHETIC_TRAINING_PATH}")
+    logger.info("Done! Pairs processed: {}, Queries generated: {}", total_pairs, total_generated)
+    logger.info("Output: {}", settings.synthetic_training_path)
 
 
 if __name__ == "__main__":

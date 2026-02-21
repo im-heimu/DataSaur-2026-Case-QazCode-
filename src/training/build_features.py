@@ -10,25 +10,13 @@ import json
 import pickle
 
 import numpy as np
+from loguru import logger
 from sentence_transformers import SentenceTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from tqdm import tqdm
 
-from src.config import (
-    PROTOCOL_FEATURES_PATH,
-    PROTOCOL_SUMMARIES_PATH,
-    SYNTHETIC_TRAINING_PATH,
-    RETRIEVER_DIR,
-    PROTOCOL_EMBEDDINGS_PATH,
-    TRAINING_FEATURES_PATH,
-    TRAINING_LABELS_PATH,
-    TRAINING_GROUPS_PATH,
-    TFIDF_PATH,
-    ICD_FEATURES_PATH,
-    TEST_SET_DIR,
-    PROCESSED_DIR,
-)
+from src.config import settings, setup_logging
 from src.training.text_utils import lemmatize_text, compute_symptom_overlap
 
 
@@ -36,29 +24,29 @@ def load_all_data():
     """Load all required data files."""
     # Protocol features
     pf_map = {}
-    if PROTOCOL_FEATURES_PATH.exists():
-        with open(PROTOCOL_FEATURES_PATH, "r", encoding="utf-8") as f:
+    if settings.protocol_features_path.exists():
+        with open(settings.protocol_features_path, "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 pf_map[data["protocol_id"]] = data
 
     # Summaries
     summaries = {}
-    with open(PROTOCOL_SUMMARIES_PATH, "r", encoding="utf-8") as f:
+    with open(settings.protocol_summaries_path, "r", encoding="utf-8") as f:
         for line in f:
             data = json.loads(line)
             summaries[data["protocol_id"]] = data["summary"]
 
     # Synthetic training data
     synthetic = []
-    with open(SYNTHETIC_TRAINING_PATH, "r", encoding="utf-8") as f:
+    with open(settings.synthetic_training_path, "r", encoding="utf-8") as f:
         for line in f:
             synthetic.append(json.loads(line))
 
     # Test queries
     test_queries = []
-    if TEST_SET_DIR.exists():
-        for fp in sorted(TEST_SET_DIR.glob("*.json")):
+    if settings.test_set_dir.exists():
+        for fp in sorted(settings.test_set_dir.glob("*.json")):
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 test_queries.append(data)
@@ -100,26 +88,27 @@ def build_icd_descriptions(pf_map: dict) -> dict[str, str]:
 
 
 def main():
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.processed_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading data...")
+    logger.info("Loading data...")
     pf_map, summaries, synthetic, test_queries = load_all_data()
-    print(f"  Protocol features: {len(pf_map)}")
-    print(f"  Summaries: {len(summaries)}")
-    print(f"  Synthetic queries: {len(synthetic)}")
-    print(f"  Test queries: {len(test_queries)}")
+    logger.info("  Protocol features: {}", len(pf_map))
+    logger.info("  Summaries: {}", len(summaries))
+    logger.info("  Synthetic queries: {}", len(synthetic))
+    logger.info("  Test queries: {}", len(test_queries))
 
     # Load retriever model and embeddings
-    print("Loading retriever model...")
-    model = SentenceTransformer(str(RETRIEVER_DIR))
-    protocol_embeddings = np.load(str(PROTOCOL_EMBEDDINGS_PATH))
-    mapping_path = PROTOCOL_EMBEDDINGS_PATH.parent / "protocol_id_mapping.json"
+    logger.info("Loading retriever model...")
+    model = SentenceTransformer(str(settings.retriever_dir))
+    protocol_embeddings = np.load(str(settings.protocol_embeddings_path))
+    mapping_path = settings.protocol_embeddings_path.parent / "protocol_id_mapping.json"
     with open(mapping_path, "r", encoding="utf-8") as f:
         protocol_ids = json.load(f)
     pid_to_idx = {pid: i for i, pid in enumerate(protocol_ids)}
 
     # Build ICD descriptions and TF-IDF
-    print("Building TF-IDF vectorizer...")
+    logger.info("Building TF-IDF vectorizer...")
     icd_descriptions = build_icd_descriptions(pf_map)
     code_frequency = compute_code_frequency(pf_map)
 
@@ -129,14 +118,14 @@ def main():
     tfidf.fit(all_texts)
 
     # Save artifacts
-    with open(str(TFIDF_PATH), "wb") as f:
+    with open(str(settings.tfidf_path), "wb") as f:
         pickle.dump(tfidf, f)
 
-    with open(str(ICD_FEATURES_PATH), "w", encoding="utf-8") as f:
+    with open(str(settings.icd_features_path), "w", encoding="utf-8") as f:
         json.dump(icd_descriptions, f, ensure_ascii=False)
 
     # Pre-compute ICD description embeddings
-    print("Computing ICD code embeddings...")
+    logger.info("Computing ICD code embeddings...")
     all_codes = sorted(icd_descriptions.keys())
     code_texts = [f"passage: {icd_descriptions[c]}" for c in all_codes]
     code_embeddings = model.encode(code_texts, show_progress_bar=True, batch_size=64)
@@ -146,7 +135,7 @@ def main():
     code_tfidf = tfidf.transform([icd_descriptions.get(c, c) for c in all_codes])
 
     # Build training groups: each group is (query, protocol) with all codes as candidates
-    print("Building feature matrix...")
+    logger.info("Building feature matrix...")
 
     # Combine synthetic + test queries
     all_queries = []
@@ -168,7 +157,7 @@ def main():
         })
 
     # Encode all queries
-    print(f"Encoding {len(all_queries)} queries...")
+    logger.info("Encoding {} queries...", len(all_queries))
     query_texts = [f"query: {q['query']}" for q in all_queries]
 
     # Batch encode
@@ -275,16 +264,16 @@ def main():
     labels = np.array(labels_list, dtype=np.float32)
     groups = np.array(groups_list, dtype=np.int32)
 
-    print(f"\nFeatures shape: {features.shape}")
-    print(f"Labels: {labels.sum():.0f} positives / {len(labels)} total")
-    print(f"Groups: {len(groups)}")
+    logger.info("Features shape: {}", features.shape)
+    logger.info("Labels: {:.0f} positives / {} total", labels.sum(), len(labels))
+    logger.info("Groups: {}", len(groups))
 
-    np.savez(str(TRAINING_FEATURES_PATH), features=features)
-    np.save(str(TRAINING_LABELS_PATH), labels)
-    np.save(str(TRAINING_GROUPS_PATH), groups)
+    np.savez(str(settings.training_features_path), features=features)
+    np.save(str(settings.training_labels_path), labels)
+    np.save(str(settings.training_groups_path), groups)
 
     # Also save train/val split info
-    split_path = PROCESSED_DIR / "query_is_test.npy"
+    split_path = settings.processed_dir / "query_is_test.npy"
     is_test_flags = []
     for q in all_queries:
         if q["protocol_id"] not in pid_to_idx:
@@ -293,10 +282,10 @@ def main():
         is_test_flags.extend([q["is_test"]] * n_codes)
     np.save(str(split_path), np.array(is_test_flags, dtype=bool))
 
-    print(f"\nSaved to:")
-    print(f"  {TRAINING_FEATURES_PATH}")
-    print(f"  {TRAINING_LABELS_PATH}")
-    print(f"  {TRAINING_GROUPS_PATH}")
+    logger.info("Saved to:")
+    logger.info("  {}", settings.training_features_path)
+    logger.info("  {}", settings.training_labels_path)
+    logger.info("  {}", settings.training_groups_path)
 
 
 if __name__ == "__main__":

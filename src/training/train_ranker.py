@@ -10,31 +10,26 @@ import json
 
 import lightgbm as lgb
 import numpy as np
+from loguru import logger
 
-from src.config import (
-    TRAINING_FEATURES_PATH,
-    TRAINING_LABELS_PATH,
-    TRAINING_GROUPS_PATH,
-    RANKER_PATH,
-    RANKER_PARAMS,
-    PROCESSED_DIR,
-)
+from src.config import settings, setup_logging
 
 
 def main():
-    RANKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.ranker_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("Loading training data...")
-    features = np.load(str(TRAINING_FEATURES_PATH))["features"]
-    labels = np.load(str(TRAINING_LABELS_PATH))
-    groups = np.load(str(TRAINING_GROUPS_PATH))
+    logger.info("Loading training data...")
+    features = np.load(str(settings.training_features_path))["features"]
+    labels = np.load(str(settings.training_labels_path))
+    groups = np.load(str(settings.training_groups_path))
 
-    print(f"Features: {features.shape}")
-    print(f"Labels: {labels.shape} ({labels.sum():.0f} positives)")
-    print(f"Groups: {groups.shape} ({groups.sum()} total rows)")
+    logger.info("Features: {}", features.shape)
+    logger.info("Labels: {} ({:.0f} positives)", labels.shape, labels.sum())
+    logger.info("Groups: {} ({} total rows)", groups.shape, groups.sum())
 
     # Split train/val based on is_test flag
-    split_path = PROCESSED_DIR / "query_is_test.npy"
+    split_path = settings.processed_dir / "query_is_test.npy"
     is_test = np.load(str(split_path))
 
     # Build group-level mask: a group is test if any of its rows are test
@@ -60,8 +55,8 @@ def main():
     X_val = features[val_mask]
     y_val = labels[val_mask]
 
-    print(f"\nTrain: {X_train.shape[0]} rows, {len(train_groups)} groups")
-    print(f"Val:   {X_val.shape[0]} rows, {len(val_groups)} groups")
+    logger.info("Train: {} rows, {} groups", X_train.shape[0], len(train_groups))
+    logger.info("Val:   {} rows, {} groups", X_val.shape[0], len(val_groups))
 
     feature_names = [
         "retrieval_score",
@@ -84,27 +79,27 @@ def main():
         reference=train_data,
     )
 
-    print("\nTraining LightGBM ranker...")
+    logger.info("Training LightGBM ranker...")
     callbacks = [lgb.log_evaluation(50)]
 
     booster = lgb.train(
-        RANKER_PARAMS,
+        settings.ranker_params,
         train_data,
         valid_sets=[val_data],
         valid_names=["val"],
-        num_boost_round=RANKER_PARAMS.get("n_estimators", 500),
+        num_boost_round=settings.ranker_params.get("n_estimators", 500),
         callbacks=callbacks,
     )
 
     # Save model
-    booster.save_model(str(RANKER_PATH))
-    print(f"\nModel saved to {RANKER_PATH}")
+    booster.save_model(str(settings.ranker_path))
+    logger.info("Model saved to {}", settings.ranker_path)
 
     # Feature importance
     importance = booster.feature_importance(importance_type="gain")
-    print("\nFeature importance (gain):")
+    logger.info("Feature importance (gain):")
     for name, imp in sorted(zip(feature_names, importance), key=lambda x: -x[1]):
-        print(f"  {name}: {imp:.1f}")
+        logger.info("  {}: {:.1f}", name, imp)
 
     # Quick validation accuracy
     if X_val.shape[0] > 0:
@@ -121,7 +116,7 @@ def main():
                 correct += 1
             total += 1
             offset += gsize
-        print(f"\nValidation Accuracy@1: {correct / total:.4f} ({correct}/{total})")
+        logger.info("Validation Accuracy@1: {:.4f} ({}/{})", correct / total, correct, total)
 
 
 if __name__ == "__main__":

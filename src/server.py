@@ -9,7 +9,9 @@ Usage:
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from loguru import logger
 
+from src.config import setup_logging
 from src.inference.engine import DiagnosisEngine
 from src.models import Diagnosis, DiagnoseRequest, DiagnoseResponse
 
@@ -19,9 +21,10 @@ engine: DiagnosisEngine | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global engine
-    print("Loading diagnosis engine...")
+    setup_logging()
+    logger.info("Loading diagnosis engine...")
     engine = DiagnosisEngine()
-    print("Server ready!")
+    logger.info("Server ready!")
     yield
     engine = None
 

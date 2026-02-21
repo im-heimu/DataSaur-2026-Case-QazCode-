@@ -2,17 +2,18 @@
 
 import lightgbm as lgb
 import numpy as np
+from loguru import logger
 
-from src.config import RANKER_PATH
+from src.config import settings
 
 
 class ICDRanker:
     """Ranks ICD code candidates using LightGBM."""
 
     def __init__(self):
-        print("  Loading LightGBM ranker...")
-        self.model = lgb.Booster(model_file=str(RANKER_PATH))
-        print("  Ranker ready")
+        logger.info("  Loading LightGBM ranker...")
+        self.model = lgb.Booster(model_file=str(settings.ranker_path))
+        logger.info("  Ranker ready")
 
     def rank(self, features: np.ndarray) -> np.ndarray:
         """Predict relevance scores for candidate features.

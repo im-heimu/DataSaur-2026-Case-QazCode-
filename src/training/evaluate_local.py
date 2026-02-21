@@ -9,24 +9,26 @@ Usage:
 import json
 import time
 
+from loguru import logger
 from tqdm import tqdm
 
-from src.config import TEST_SET_DIR
+from src.config import settings, setup_logging
 from src.inference.engine import DiagnosisEngine
 
 
 def main():
-    print("Loading inference engine...")
+    setup_logging()
+    logger.info("Loading inference engine...")
     engine = DiagnosisEngine()
 
     # Load test queries
     test_queries = []
-    for fp in sorted(TEST_SET_DIR.glob("*.json")):
+    for fp in sorted(settings.test_set_dir.glob("*.json")):
         with open(fp, "r", encoding="utf-8") as f:
             data = json.load(f)
             test_queries.append(data)
 
-    print(f"Test queries: {len(test_queries)}")
+    logger.info("Test queries: {}", len(test_queries))
 
     accuracy_hits = 0
     recall_hits = 0
@@ -53,11 +55,11 @@ def main():
             recall_hits += 1
 
     total = len(test_queries)
-    print(f"\n=== Results ({total} test cases) ===")
-    print(f"Accuracy@1: {accuracy_hits / total:.4f} ({accuracy_hits}/{total})")
-    print(f"Recall@3:   {recall_hits / total:.4f} ({recall_hits}/{total})")
-    print(f"Avg latency: {sum(latencies) / len(latencies):.3f}s")
-    print(f"P95 latency: {sorted(latencies)[int(0.95 * len(latencies))]:.3f}s")
+    logger.info("=== Results ({} test cases) ===", total)
+    logger.info("Accuracy@1: {:.4f} ({}/{})", accuracy_hits / total, accuracy_hits, total)
+    logger.info("Recall@3:   {:.4f} ({}/{})", recall_hits / total, recall_hits, total)
+    logger.info("Avg latency: {:.3f}s", sum(latencies) / len(latencies))
+    logger.info("P95 latency: {:.3f}s", sorted(latencies)[int(0.95 * len(latencies))])
 
 
 if __name__ == "__main__":

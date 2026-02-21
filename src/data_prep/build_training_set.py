@@ -7,30 +7,28 @@ Usage:
 """
 
 import json
-from pathlib import Path
 
-from src.config import (
-    PROCESSED_DIR,
-    SYNTHETIC_TRAINING_PATH,
-    TEST_SET_DIR,
-)
+from loguru import logger
+
+from src.config import settings, setup_logging
 
 
 def main():
-    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.processed_dir.mkdir(parents=True, exist_ok=True)
 
     # Load synthetic data
     synthetic = []
-    if SYNTHETIC_TRAINING_PATH.exists():
-        with open(SYNTHETIC_TRAINING_PATH, "r", encoding="utf-8") as f:
+    if settings.synthetic_training_path.exists():
+        with open(settings.synthetic_training_path, "r", encoding="utf-8") as f:
             for line in f:
                 synthetic.append(json.loads(line))
-    print(f"Synthetic training examples: {len(synthetic)}")
+    logger.info("Synthetic training examples: {}", len(synthetic))
 
     # Load test set queries (for validation)
     test_queries = []
-    if TEST_SET_DIR.exists():
-        for fp in sorted(TEST_SET_DIR.glob("*.json")):
+    if settings.test_set_dir.exists():
+        for fp in sorted(settings.test_set_dir.glob("*.json")):
             with open(fp, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 test_queries.append({
@@ -40,23 +38,23 @@ def main():
                     "all_icd_codes": data["icd_codes"],
                     "is_test": True,
                 })
-    print(f"Test set queries: {len(test_queries)}")
+    logger.info("Test set queries: {}", len(test_queries))
 
     # Write combined training set
-    train_path = PROCESSED_DIR / "combined_training.jsonl"
+    train_path = settings.processed_dir / "combined_training.jsonl"
     with open(train_path, "w", encoding="utf-8") as f:
         for item in synthetic:
             item["is_test"] = False
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
     # Write validation set separately
-    val_path = PROCESSED_DIR / "validation_set.jsonl"
+    val_path = settings.processed_dir / "validation_set.jsonl"
     with open(val_path, "w", encoding="utf-8") as f:
         for item in test_queries:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    print(f"\nTraining set: {train_path} ({len(synthetic)} examples)")
-    print(f"Validation set: {val_path} ({len(test_queries)} examples)")
+    logger.info("Training set: {} ({} examples)", train_path, len(synthetic))
+    logger.info("Validation set: {} ({} examples)", val_path, len(test_queries))
 
 
 if __name__ == "__main__":

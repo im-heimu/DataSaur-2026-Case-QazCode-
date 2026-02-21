@@ -12,24 +12,17 @@ import asyncio
 import json
 import re
 
+from loguru import logger
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
-from src.config import (
-    CORPUS_PATH,
-    GPT_OSS_CONCURRENCY,
-    GPT_OSS_KEY,
-    GPT_OSS_MODEL,
-    GPT_OSS_URL,
-    PROTOCOL_FEATURES_PATH,
-    TRUNCATION_MARKERS,
-)
+from src.config import settings, setup_logging
 
 
 def truncate_protocol_text(text: str, max_chars: int = 8000) -> str:
     """Truncate protocol text to diagnostic sections only."""
     earliest_pos = len(text)
-    for marker in TRUNCATION_MARKERS:
+    for marker in settings.truncation_markers:
         pos = text.find(marker)
         if pos != -1 and pos < earliest_pos:
             earliest_pos = pos
@@ -43,7 +36,7 @@ def truncate_protocol_text(text: str, max_chars: int = 8000) -> str:
 def load_protocols() -> list[dict]:
     """Load protocols that have ICD codes."""
     protocols = []
-    with open(CORPUS_PATH, "r", encoding="utf-8") as f:
+    with open(settings.corpus_path, "r", encoding="utf-8") as f:
         for line in f:
             p = json.loads(line)
             if p.get("icd_codes") and len(p["icd_codes"]) > 0:
@@ -189,7 +182,7 @@ async def extract_features_for_protocol(
     for attempt in range(max_retries):
         try:
             response = await client.chat.completions.create(
-                model=GPT_OSS_MODEL,
+                model=settings.gpt_oss_model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
@@ -211,48 +204,51 @@ async def extract_features_for_protocol(
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** (attempt + 1))
                 continue
-            print(
-                f"  Failed to parse JSON for {protocol['protocol_id']} after {max_retries} attempts"
+            logger.error(
+                "Failed to parse JSON for {} after {} attempts",
+                protocol["protocol_id"],
+                max_retries,
             )
             return None
         except Exception as e:
             if attempt < max_retries - 1:
                 await asyncio.sleep(2 ** (attempt + 1))
                 continue
-            print(f"  API error for {protocol['protocol_id']}: {e}")
+            logger.error("API error for {}: {}", protocol["protocol_id"], e)
             return None
 
 
 async def main():
-    PROTOCOL_FEATURES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    setup_logging()
+    settings.protocol_features_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Load already processed protocols for resumability
     processed_ids = set()
-    if PROTOCOL_FEATURES_PATH.exists():
-        with open(PROTOCOL_FEATURES_PATH, "r", encoding="utf-8") as f:
+    if settings.protocol_features_path.exists():
+        with open(settings.protocol_features_path, "r", encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 processed_ids.add(data["protocol_id"])
-        print(f"Resuming: {len(processed_ids)} already processed")
+        logger.info("Resuming: {} already processed", len(processed_ids))
 
     protocols = load_protocols()
-    print(f"Total protocols with ICD codes: {len(protocols)}")
+    logger.info("Total protocols with ICD codes: {}", len(protocols))
 
     remaining = [p for p in protocols if p["protocol_id"] not in processed_ids]
-    print(f"Remaining to process: {len(remaining)}")
+    logger.info("Remaining to process: {}", len(remaining))
 
     if not remaining:
-        print("All protocols already processed!")
+        logger.info("All protocols already processed!")
         return
 
-    client = AsyncOpenAI(base_url=GPT_OSS_URL, api_key=GPT_OSS_KEY)
-    semaphore = asyncio.Semaphore(GPT_OSS_CONCURRENCY)
+    client = AsyncOpenAI(base_url=settings.gpt_oss_url, api_key=settings.gpt_oss_key)
+    semaphore = asyncio.Semaphore(settings.gpt_oss_concurrency)
 
     success_count = 0
     fail_count = 0
     lock = asyncio.Lock()
 
-    out_f = open(PROTOCOL_FEATURES_PATH, "a", encoding="utf-8")
+    out_f = open(settings.protocol_features_path, "a", encoding="utf-8")
 
     async def process_one(protocol: dict):
         nonlocal success_count, fail_count
@@ -272,8 +268,8 @@ async def main():
     out_f.close()
     await client.close()
 
-    print(f"\nDone! Success: {success_count}, Failed: {fail_count}")
-    print(f"Output: {PROTOCOL_FEATURES_PATH}")
+    logger.info("Done! Success: {}, Failed: {}", success_count, fail_count)
+    logger.info("Output: {}", settings.protocol_features_path)
 
 
 if __name__ == "__main__":

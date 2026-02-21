@@ -1,14 +1,15 @@
 """Feature builder for inference: computes features for (query, protocol, icd_code) triples."""
 
+import json
 import pickle
 import re
 
 import numpy as np
+from loguru import logger
 from sklearn.metrics.pairwise import cosine_similarity
 
-from src.config import ICD_FEATURES_PATH, TFIDF_PATH
+from src.config import settings
 
-import json
 import pymorphy3
 
 
@@ -16,19 +17,19 @@ class FeatureBuilder:
     """Builds feature vectors for LightGBM ranker at inference time."""
 
     def __init__(self, retriever_model):
-        print("  Loading TF-IDF vectorizer...")
-        with open(str(TFIDF_PATH), "rb") as f:
+        logger.info("  Loading TF-IDF vectorizer...")
+        with open(str(settings.tfidf_path), "rb") as f:
             self.tfidf = pickle.load(f)
 
-        print("  Loading ICD features...")
-        with open(str(ICD_FEATURES_PATH), "r", encoding="utf-8") as f:
+        logger.info("  Loading ICD features...")
+        with open(str(settings.icd_features_path), "r", encoding="utf-8") as f:
             self.icd_descriptions = json.load(f)
 
         self.retriever_model = retriever_model
         self.morph = pymorphy3.MorphAnalyzer()
 
         # Pre-compute ICD description embeddings and TF-IDF vectors
-        print("  Pre-computing ICD embeddings...")
+        logger.info("  Pre-computing ICD embeddings...")
         self.all_codes = sorted(self.icd_descriptions.keys())
         if self.all_codes:
             code_texts = [
@@ -49,7 +50,7 @@ class FeatureBuilder:
         # Code frequency (pre-loaded from protocol_data)
         self.code_frequency = {}
 
-        print("  Feature builder ready")
+        logger.info("  Feature builder ready")
 
     def set_code_frequency(self, freq: dict[str, int]):
         """Set code corpus frequency from protocol data."""

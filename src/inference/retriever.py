@@ -3,27 +3,24 @@
 import json
 
 import numpy as np
+from loguru import logger
 from sentence_transformers import SentenceTransformer
 
-from src.config import (
-    PROTOCOL_EMBEDDINGS_PATH,
-    RETRIEVER_DIR,
-    TOP_K_PROTOCOLS,
-)
+from src.config import settings
 
 
 class ProtocolRetriever:
     """Retrieves top-K protocols using bi-encoder similarity."""
 
     def __init__(self):
-        print("  Loading retriever model...")
-        self.model = SentenceTransformer(str(RETRIEVER_DIR))
+        logger.info("  Loading retriever model...")
+        self.model = SentenceTransformer(str(settings.retriever_dir))
         self.model.max_seq_length = 512
 
-        print("  Loading protocol embeddings...")
-        self.embeddings = np.load(str(PROTOCOL_EMBEDDINGS_PATH))
+        logger.info("  Loading protocol embeddings...")
+        self.embeddings = np.load(str(settings.protocol_embeddings_path))
 
-        mapping_path = PROTOCOL_EMBEDDINGS_PATH.parent / "protocol_id_mapping.json"
+        mapping_path = settings.protocol_embeddings_path.parent / "protocol_id_mapping.json"
         with open(mapping_path, "r", encoding="utf-8") as f:
             self.protocol_ids = json.load(f)
 
@@ -31,10 +28,10 @@ class ProtocolRetriever:
         norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
         self.embeddings_normalized = self.embeddings / np.maximum(norms, 1e-8)
 
-        print(f"  Retriever ready: {len(self.protocol_ids)} protocols")
+        logger.info("  Retriever ready: {} protocols", len(self.protocol_ids))
 
     def retrieve(
-        self, query: str, top_k: int = TOP_K_PROTOCOLS
+        self, query: str, top_k: int = settings.top_k_protocols
     ) -> list[tuple[str, float]]:
         """Retrieve top-K protocols for a query.
 
