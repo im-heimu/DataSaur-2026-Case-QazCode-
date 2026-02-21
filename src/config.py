@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     ranker_reg_lambda: float = 0.1
 
     # ── Inference ───────────────────────────────────────────────
-    top_k_protocols: int = 10
+    top_k_protocols: int = 20
     top_n_diagnoses: int = 3
 
     # ── Text processing ─────────────────────────────────────────
