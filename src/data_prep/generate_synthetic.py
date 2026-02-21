@@ -86,7 +86,10 @@ async def generate_queries(
                 temperature=0.9,
                 max_tokens=4096,
             )
-            content = response.choices[0].message.content.strip()
+            content = response.choices[0].message.content
+            if not content:
+                raise ValueError("Empty response from API")
+            content = content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1]
                 if content.endswith("```"):
