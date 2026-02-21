@@ -8,6 +8,8 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 COPY models/ ./models/
+COPY data/processed/protocol_features.jsonl ./data/processed/protocol_features.jsonl
+COPY data/processed/protocol_summaries.jsonl ./data/processed/protocol_summaries.jsonl
 COPY src/ ./src/
 
 ENV PYTHONUNBUFFERED=1
