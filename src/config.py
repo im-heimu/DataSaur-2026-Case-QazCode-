@@ -61,10 +61,9 @@ class Settings(BaseSettings):
     top_k_protocols: int = 20
     top_n_diagnoses: int = 3
 
-    # ── Code ranking weights ──────────────────────────────────
-    w_code_embedding: float = 0.3
-    w_code_tfidf: float = 0.2
-    w_protocol_rank: float = 0.5
+    # ── Code ranking weights (tiebreaker within protocol) ────
+    w_code_embedding: float = 0.1
+    w_code_tfidf: float = 0.1
 
     # ── Text processing ─────────────────────────────────────────
     truncation_markers: list[str] = [
