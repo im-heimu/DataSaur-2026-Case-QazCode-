@@ -149,6 +149,7 @@ def build_training_examples(
     body_system_map: dict[str, list[str]],
     max_per_protocol: int = 20,
     hard_negatives_per_positive: int = 2,
+    test_queries: list[dict] | None = None,
 ) -> list[InputExample]:
     """Build training examples with CosineSimilarityLoss.
 
@@ -161,6 +162,13 @@ def build_training_examples(
         pid = item["protocol_id"]
         if pid in passages:
             by_protocol[pid].append(item["query"])
+
+    # Add test queries as additional positive pairs (real distribution)
+    if test_queries:
+        for tq in test_queries:
+            pid = tq["protocol_id"]
+            if pid in passages:
+                by_protocol[pid].append(tq["query"])
 
     # Build pid -> chapter mapping
     pid_to_chapter = {}
@@ -282,6 +290,7 @@ def main():
         synthetic, passages, chapter_map, body_system_map,
         max_per_protocol=settings.retriever_max_per_protocol,
         hard_negatives_per_positive=settings.retriever_hard_negatives_per_positive,
+        test_queries=test_queries,
     )
     logger.info("  Training examples: {} (pos+neg pairs)", len(examples))
 

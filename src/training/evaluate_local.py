@@ -32,6 +32,10 @@ def evaluate(
     retrieval_hits = 0
     latencies = []
 
+    llm_helped = 0
+    llm_hurt = 0
+    llm_neutral = 0
+
     iterator = tqdm(test_queries, desc="Evaluating") if show_progress else test_queries
 
     for tq in iterator:
@@ -55,7 +59,8 @@ def evaluate(
             accuracy_hits += 1
 
         # Recall@3
-        if any(c in valid_codes for c in top_codes):
+        hit = any(c in valid_codes for c in top_codes)
+        if hit:
             recall_hits += 1
 
     total = len(test_queries)

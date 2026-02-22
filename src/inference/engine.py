@@ -182,7 +182,7 @@ class DiagnosisEngine:
         query_tfidf = self.tfidf.transform([symptoms])
 
         # Step 3: Collect wider candidate pool for LLM (or just top_n if no LLM)
-        n_candidates = 10 if self.llm_enabled else top_n
+        n_candidates = 15 if self.llm_enabled else top_n
         candidates = self._collect_all_candidates(
             symptoms, retrieved, query_norm, query_tfidf, max_candidates=n_candidates
         )
@@ -194,32 +194,37 @@ class DiagnosisEngine:
         if self.llm_enabled and len(candidates) > top_n:
             llm_codes = llm_rerank(symptoms, candidates)
             if llm_codes:
-                # Build results from LLM-selected codes
                 code_to_cand = {c["icd10_code"]: c for c in candidates}
-                llm_results = []
+                retriever_top = {c["icd10_code"] for c in candidates[:top_n]}
+
+                # Merge strategy: LLM codes first, then fill from retriever order
+                # This gives LLM full control over selection from wider pool
+                merged = []
+                seen = set()
+                # LLM-selected codes first
                 for code in llm_codes[:top_n]:
-                    if code in code_to_cand:
+                    if code in code_to_cand and code not in seen:
+                        seen.add(code)
                         cand = code_to_cand[code]
-                        llm_results.append({
-                            "rank": len(llm_results) + 1,
+                        merged.append({
+                            "rank": len(merged) + 1,
                             "diagnosis": cand["diagnosis"],
                             "icd10_code": cand["icd10_code"],
                             "explanation": cand["explanation"],
                         })
-                # Fill remaining slots from retriever order if LLM returned < top_n
-                if len(llm_results) < top_n:
-                    llm_selected = {r["icd10_code"] for r in llm_results}
-                    for cand in candidates:
-                        if cand["icd10_code"] not in llm_selected:
-                            llm_results.append({
-                                "rank": len(llm_results) + 1,
-                                "diagnosis": cand["diagnosis"],
-                                "icd10_code": cand["icd10_code"],
-                                "explanation": cand["explanation"],
-                            })
-                            if len(llm_results) >= top_n:
-                                break
-                return llm_results
+                # Fill remaining from retriever order
+                for cand in candidates:
+                    if len(merged) >= top_n:
+                        break
+                    if cand["icd10_code"] not in seen:
+                        seen.add(cand["icd10_code"])
+                        merged.append({
+                            "rank": len(merged) + 1,
+                            "diagnosis": cand["diagnosis"],
+                            "icd10_code": cand["icd10_code"],
+                            "explanation": cand["explanation"],
+                        })
+                return merged
 
         return candidates[:top_n]
 

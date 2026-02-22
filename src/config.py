@@ -43,10 +43,10 @@ class Settings(BaseSettings):
     # ── Retriever ───────────────────────────────────────────────
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
-    retriever_epochs: int = 2
+    retriever_epochs: int = 3
     retriever_batch_size: int = 96
     retriever_lr: float = 2e-5
-    retriever_max_per_protocol: int = 12
+    retriever_max_per_protocol: int = 16
     retriever_hard_negatives_per_positive: int = 2
 
     # ── Ranker ──────────────────────────────────────────────────
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     reranker_top_k_output: int = 10  # keep this many after reranking
 
     # ── Inference ───────────────────────────────────────────────
-    top_k_protocols: int = 20
+    top_k_protocols: int = 30
     top_n_diagnoses: int = 3
 
     # ── Code ranking weights (tiebreaker within protocol) ────
