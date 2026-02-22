@@ -15,32 +15,11 @@ from src.config import settings
 
 SYSTEM_PROMPT = """Ты — опытный врач-клиницист. Тебе дано описание пациента и список возможных диагнозов с кодами МКБ-10.
 
-Твоя задача: выбрать РОВНО 3 наиболее вероятных диагноза из предложенного списка и расположить их в порядке убывания вероятности.
+Выбери РОВНО 3 наиболее вероятных диагноза из предложенного списка.
+Используй ТОЛЬКО коды из списка.
 
-ВАЖНО:
-- Используй ТОЛЬКО коды из предложенного списка
-- Первый код — наиболее вероятный диагноз
-- Учитывай симптомы, анамнез, возраст, пол при выборе"""
-
-RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "diagnosis_response",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "codes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "3 ICD-10 codes in order of likelihood",
-                },
-            },
-            "required": ["codes"],
-            "additionalProperties": False,
-        },
-    },
-}
+В самом конце ответа напиши итог СТРОГО в формате:
+РЕЗУЛЬТАТ: КОД1, КОД2, КОД3"""
 
 
 def build_candidates_text(candidates: list[dict]) -> str:
@@ -52,8 +31,50 @@ def build_candidates_text(candidates: list[dict]) -> str:
         explanation = c.get("explanation", "")
         lines.append(f"{i}. {code} — {name}")
         if explanation:
-            lines.append(f"   Описание: {explanation}")
+            lines.append(f"   {explanation}")
     return "\n".join(lines)
+
+
+def _extract_codes(text: str, valid_codes: set[str]) -> list[str] | None:
+    """Extract ICD codes from LLM response text using multiple strategies."""
+    if not text:
+        return None
+
+    # Strategy 1: Look for "РЕЗУЛЬТАТ: ..." line
+    result_match = re.search(r'РЕЗУЛЬТАТ\s*:\s*(.+)', text, re.IGNORECASE)
+    if result_match:
+        line = result_match.group(1)
+        found = [c for c in valid_codes if c in line]
+        if found:
+            # Preserve order from line
+            positions = [(line.find(c), c) for c in found]
+            positions.sort()
+            return [c for _, c in positions][:3]
+
+    # Strategy 2: Find JSON with "codes" key
+    json_match = re.search(r'\{[^{}]*"codes"\s*:\s*\[[^\]]*\][^{}]*\}', text)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(0))
+            codes = parsed.get("codes", [])
+            filtered = [c for c in codes if c in valid_codes]
+            if filtered:
+                return filtered[:3]
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: Find all valid ICD codes mentioned in text, take last 3
+    # (LLM typically concludes with final answer)
+    all_found = []
+    for m in re.finditer(r'[A-Z]\d{2}(?:\.\d{1,2})?', text):
+        code = m.group(0)
+        if code in valid_codes and code not in all_found:
+            all_found.append(code)
+    if all_found:
+        # Take last 3 unique codes (conclusion usually at end)
+        return all_found[-3:] if len(all_found) > 3 else all_found
+
+    return None
 
 
 def llm_rerank(
@@ -61,11 +82,7 @@ def llm_rerank(
     candidates: list[dict],
     timeout: float = 30.0,
 ) -> list[str] | None:
-    """Ask QazCode LLM to select best 3 codes from candidates.
-
-    Returns:
-        List of 3 ICD codes in order of likelihood, or None on failure.
-    """
+    """Ask QazCode LLM to select best 3 codes from candidates."""
     if not candidates:
         return None
 
@@ -80,7 +97,7 @@ def llm_rerank(
 Возможные диагнозы:
 {candidates_text}
 
-Выбери 3 наиболее вероятных диагноза из списка выше."""
+Выбери 3 наиболее вероятных. В конце напиши: РЕЗУЛЬТАТ: КОД1, КОД2, КОД3"""
 
     try:
         response = httpx.post(
@@ -95,8 +112,7 @@ def llm_rerank(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                "response_format": RESPONSE_FORMAT,
-                "max_tokens": 200,
+                "max_tokens": 512,
                 "temperature": 0.0,
             },
             timeout=timeout,
@@ -105,35 +121,30 @@ def llm_rerank(
         data = response.json()
 
         message = data["choices"][0]["message"]
-        content = message.get("content") or ""
 
-        if not content.strip():
-            logger.warning("LLM returned empty content")
-            return None
+        # Collect ALL text from response
+        texts = []
+        for key in ("content", "reasoning_content"):
+            val = message.get(key)
+            if val:
+                texts.append(val)
+        psf = message.get("provider_specific_fields", {})
+        if psf:
+            for key in ("reasoning", "reasoning_content"):
+                val = psf.get(key)
+                if val and val not in texts:
+                    texts.append(val)
 
-        parsed = json.loads(content)
-        codes = parsed.get("codes", [])
+        # Try each text source
+        for text in texts:
+            codes = _extract_codes(text, valid_codes)
+            if codes:
+                return codes
 
-        if codes and isinstance(codes, list):
-            filtered = [c for c in codes if c in valid_codes]
-            if filtered:
-                return filtered[:3]
-
-        logger.warning("LLM returned no valid codes from: {}", codes)
-        return None
-
-    except json.JSONDecodeError as e:
-        # Fallback: try to find codes in raw content
-        logger.warning("LLM JSON parse failed: {}, trying regex fallback", e)
-        try:
-            text = data["choices"][0]["message"].get("content") or ""
-            found = [c for c in valid_codes if c in text]
-            if found:
-                positions = [(text.find(c), c) for c in found]
-                positions.sort()
-                return [c for _, c in positions][:3]
-        except Exception:
-            pass
+        if texts:
+            logger.warning("LLM: no codes found in {} chars of response", sum(len(t) for t in texts))
+        else:
+            logger.warning("LLM returned completely empty response")
         return None
 
     except (httpx.HTTPError, KeyError, IndexError) as e:
