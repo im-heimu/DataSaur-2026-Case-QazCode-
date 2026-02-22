@@ -88,7 +88,20 @@ def llm_rerank(
         response.raise_for_status()
         data = response.json()
 
-        content = data["choices"][0]["message"]["content"].strip()
+        message = data["choices"][0]["message"]
+        content = message.get("content") or ""
+        # Reasoning models may put answer in reasoning_content
+        if not content.strip():
+            content = (
+                message.get("reasoning_content")
+                or message.get("provider_specific_fields", {}).get("reasoning_content")
+                or ""
+            )
+        content = content.strip()
+
+        if not content:
+            logger.warning("LLM returned empty content")
+            return None
 
         # Parse JSON from response (handle markdown wrapping)
         if content.startswith("```"):
@@ -96,6 +109,13 @@ def llm_rerank(
             if content.startswith("json"):
                 content = content[4:]
             content = content.strip()
+
+        # Try to extract JSON from mixed text
+        if not content.startswith("{"):
+            import re
+            json_match = re.search(r'\{[^}]*"codes"\s*:\s*\[[^\]]*\][^}]*\}', content)
+            if json_match:
+                content = json_match.group(0)
 
         parsed = json.loads(content)
         codes = parsed.get("codes", [])
