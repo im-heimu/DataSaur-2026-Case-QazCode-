@@ -19,12 +19,28 @@ SYSTEM_PROMPT = """Ты — опытный врач-клиницист. Тебе
 
 ВАЖНО:
 - Используй ТОЛЬКО коды из предложенного списка
-- Отвечай СТРОГО в формате JSON без markdown
 - Первый код — наиболее вероятный диагноз
-- Учитывай симптомы, анамнез, возраст, пол при выборе
+- Учитывай симптомы, анамнез, возраст, пол при выборе"""
 
-Формат ответа:
-{"codes": ["КОД1", "КОД2", "КОД3"]}"""
+RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "diagnosis_response",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "3 ICD-10 codes in order of likelihood",
+                },
+            },
+            "required": ["codes"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def build_candidates_text(candidates: list[dict]) -> str:
@@ -38,49 +54,6 @@ def build_candidates_text(candidates: list[dict]) -> str:
         if explanation:
             lines.append(f"   Описание: {explanation}")
     return "\n".join(lines)
-
-
-def _extract_codes_from_text(text: str, valid_codes: set[str]) -> list[str] | None:
-    """Try to extract ICD codes from any text (JSON, reasoning, etc.)."""
-    # Try 1: Parse as JSON directly
-    try:
-        parsed = json.loads(text)
-        codes = parsed.get("codes", [])
-        if codes:
-            filtered = [c for c in codes if c in valid_codes]
-            if filtered:
-                return filtered[:3]
-    except (json.JSONDecodeError, AttributeError):
-        pass
-
-    # Try 2: Find JSON object with "codes" in text
-    json_match = re.search(r'\{[^{}]*"codes"\s*:\s*\[[^\]]*\][^{}]*\}', text)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group(0))
-            codes = parsed.get("codes", [])
-            filtered = [c for c in codes if c in valid_codes]
-            if filtered:
-                return filtered[:3]
-        except json.JSONDecodeError:
-            pass
-
-    # Try 3: Find quoted ICD codes directly in text
-    found = []
-    for code in valid_codes:
-        # Match code in quotes or after numbering
-        if re.search(rf'["\']?{re.escape(code)}["\']?', text):
-            found.append(code)
-    if found:
-        # Try to preserve order from text
-        positions = []
-        for code in found:
-            pos = text.find(code)
-            positions.append((pos, code))
-        positions.sort()
-        return [code for _, code in positions][:3]
-
-    return None
 
 
 def llm_rerank(
@@ -107,7 +80,7 @@ def llm_rerank(
 Возможные диагнозы:
 {candidates_text}
 
-Выбери 3 наиболее вероятных диагноза из списка выше. Ответь ТОЛЬКО в формате JSON: {{"codes": ["КОД1", "КОД2", "КОД3"]}}"""
+Выбери 3 наиболее вероятных диагноза из списка выше."""
 
     try:
         response = httpx.post(
@@ -122,6 +95,7 @@ def llm_rerank(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
+                "response_format": RESPONSE_FORMAT,
                 "max_tokens": 200,
                 "temperature": 0.0,
             },
@@ -131,37 +105,35 @@ def llm_rerank(
         data = response.json()
 
         message = data["choices"][0]["message"]
+        content = message.get("content") or ""
 
-        # Collect all text from response (content + reasoning)
-        all_texts = []
-        content = message.get("content")
-        if content:
-            all_texts.append(content)
-
-        reasoning = message.get("reasoning_content")
-        if reasoning:
-            all_texts.append(reasoning)
-
-        psf = message.get("provider_specific_fields", {})
-        if psf:
-            for key in ("reasoning", "reasoning_content"):
-                val = psf.get(key)
-                if val and val not in all_texts:
-                    all_texts.append(val)
-
-        if not all_texts:
-            logger.warning("LLM returned no content at all")
+        if not content.strip():
+            logger.warning("LLM returned empty content")
             return None
 
-        # Try to extract codes from each text, preferring content over reasoning
-        for text in all_texts:
-            codes = _extract_codes_from_text(text, valid_codes)
-            if codes:
-                return codes
+        parsed = json.loads(content)
+        codes = parsed.get("codes", [])
 
-        # Log first 200 chars for debugging
-        combined = " | ".join(t[:100] for t in all_texts)
-        logger.warning("LLM: could not extract codes from: {}", combined[:200])
+        if codes and isinstance(codes, list):
+            filtered = [c for c in codes if c in valid_codes]
+            if filtered:
+                return filtered[:3]
+
+        logger.warning("LLM returned no valid codes from: {}", codes)
+        return None
+
+    except json.JSONDecodeError as e:
+        # Fallback: try to find codes in raw content
+        logger.warning("LLM JSON parse failed: {}, trying regex fallback", e)
+        try:
+            text = data["choices"][0]["message"].get("content") or ""
+            found = [c for c in valid_codes if c in text]
+            if found:
+                positions = [(text.find(c), c) for c in found]
+                positions.sort()
+                return [c for _, c in positions][:3]
+        except Exception:
+            pass
         return None
 
     except (httpx.HTTPError, KeyError, IndexError) as e:
