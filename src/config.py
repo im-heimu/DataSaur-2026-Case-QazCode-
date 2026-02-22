@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     gpt_oss_model: str = "gpt-4.1-mini"
     gpt_oss_concurrency: int = 100
 
+    # ── QazCode LLM API (inference-time reasoning) ────────────
+    qazcode_url: str = "https://hub.qazcode.ai"
+    qazcode_key: str = Field(default="")
+    qazcode_model: str = "oss-120b"
+    qazcode_enabled: bool = False  # enable after maximizing non-LLM metrics
+
     # ── Retriever ───────────────────────────────────────────────
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
