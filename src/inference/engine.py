@@ -1,4 +1,4 @@
-"""DiagnosisEngine: retrieval + multi-signal code ranking."""
+"""DiagnosisEngine: retrieval + protocol-first code ranking with multi-signal tiebreaking."""
 
 import json
 import pickle
@@ -14,9 +14,9 @@ from src.inference.retriever import ProtocolRetriever
 class DiagnosisEngine:
     """Full inference pipeline: query -> top-N ICD-10 diagnoses.
 
-    Uses bi-encoder + cross-encoder retrieval for protocols, then ranks
-    ICD codes using a combination of embedding similarity, TF-IDF
-    similarity, and protocol rank weighting.
+    Strategy: protocol-first ordering (codes from best-ranked protocol
+    come first), with embedding + TF-IDF similarity as tiebreaker
+    within the same protocol.
     """
 
     def __init__(self):
@@ -62,22 +62,135 @@ class DiagnosisEngine:
 
         self.code_to_idx = {c: i for i, c in enumerate(self.all_codes)}
 
-        # Scoring weights
+        # Scoring weights for within-protocol tiebreaking
         self.w_code_embedding = settings.w_code_embedding
         self.w_code_tfidf = settings.w_code_tfidf
-        self.w_protocol_rank = settings.w_protocol_rank
 
-        logger.info("DiagnosisEngine ready! (weights: emb={}, tfidf={}, rank={})",
-                     self.w_code_embedding, self.w_code_tfidf, self.w_protocol_rank)
+        logger.info("DiagnosisEngine ready! (tiebreak weights: emb={}, tfidf={})",
+                     self.w_code_embedding, self.w_code_tfidf)
 
-    def _collect_candidates(
+    def _code_score(self, code: str, query_norm: np.ndarray, query_tfidf) -> float:
+        """Compute combined code similarity score for within-protocol ranking."""
+        emb_sim = 0.0
+        tfidf_sim = 0.0
+
+        if code in self.code_to_idx:
+            cidx = self.code_to_idx[code]
+            emb_sim = float(np.dot(query_norm, self.code_embeddings[cidx]))
+            if self.code_tfidf is not None:
+                tfidf_sim = float(
+                    cosine_similarity(query_tfidf, self.code_tfidf[cidx:cidx + 1])[0, 0]
+                )
+
+        return self.w_code_embedding * emb_sim + self.w_code_tfidf * tfidf_sim
+
+    def diagnose(
         self,
         symptoms: str,
-        query_norm: np.ndarray,
-        query_tfidf,
-        retrieved: list[tuple[str, float]],
+        top_n: int = settings.top_n_diagnoses,
+        w_code_embedding: float | None = None,
+        w_code_tfidf: float | None = None,
     ) -> list[dict]:
-        """Collect candidate codes from retrieved protocols with raw signal scores."""
+        """Run full diagnosis pipeline.
+
+        Protocol-first strategy: emit codes from the best-ranked protocol
+        first, using embedding + TF-IDF similarity only as tiebreaker
+        within the same protocol.
+        """
+        if not symptoms or not symptoms.strip():
+            return []
+
+        # Allow weight override for optimization
+        orig_w_emb, orig_w_tfidf = self.w_code_embedding, self.w_code_tfidf
+        if w_code_embedding is not None:
+            self.w_code_embedding = w_code_embedding
+        if w_code_tfidf is not None:
+            self.w_code_tfidf = w_code_tfidf
+
+        # Step 1: Retrieve top-K protocols
+        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
+
+        # Step 2: Encode query for code scoring
+        query_embedding = self.retriever.model.encode(
+            f"query: {symptoms}", show_progress_bar=False
+        )
+        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
+        query_tfidf = self.tfidf.transform([symptoms])
+
+        # Step 3: Protocol-first code emission
+        results = []
+        seen_codes = set()
+
+        for pid, retrieval_score in retrieved:
+            pd = self.protocol_data.get(pid)
+            if not pd:
+                continue
+
+            icd_codes = pd.get("icd_codes", [])
+            features = pd.get("features", {})
+            icd_code_descriptions = features.get("icd_code_descriptions", [])
+
+            # Score and sort codes within this protocol
+            code_scores = []
+            for code in icd_codes:
+                if code in seen_codes:
+                    continue
+                score = self._code_score(code, query_norm, query_tfidf)
+                code_scores.append((code, score))
+
+            code_scores.sort(key=lambda x: -x[1])
+
+            for code, score in code_scores:
+                if code in seen_codes:
+                    continue
+                seen_codes.add(code)
+
+                code_name = code
+                dist_features = ""
+                for cd in icd_code_descriptions:
+                    if cd.get("code") == code:
+                        code_name = cd.get("name", code)
+                        dist_features = cd.get("distinguishing_features", "")
+                        break
+
+                disease = features.get("disease_name", "")
+                explanation = disease if disease else f"Код: {code}"
+                if dist_features:
+                    explanation += f". {dist_features}"
+
+                results.append({
+                    "rank": len(results) + 1,
+                    "diagnosis": code_name,
+                    "icd10_code": code,
+                    "explanation": explanation,
+                })
+
+                if len(results) >= top_n:
+                    # Restore weights
+                    self.w_code_embedding, self.w_code_tfidf = orig_w_emb, orig_w_tfidf
+                    return results
+
+        # Restore weights
+        self.w_code_embedding, self.w_code_tfidf = orig_w_emb, orig_w_tfidf
+        return results
+
+    def precompute_candidates(self, symptoms: str) -> list[dict]:
+        """Retrieve protocols and compute per-code signals for weight optimization.
+
+        Returns list of candidate dicts with raw signal scores grouped by
+        protocol rank (for protocol-first scoring).
+        """
+        if not symptoms or not symptoms.strip():
+            return []
+
+        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
+
+        query_embedding = self.retriever.model.encode(
+            f"query: {symptoms}", show_progress_bar=False
+        )
+        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
+        query_tfidf = self.tfidf.transform([symptoms])
+
         candidates = []
         seen_codes = set()
 
@@ -89,28 +202,22 @@ class DiagnosisEngine:
             icd_codes = pd.get("icd_codes", [])
             features = pd.get("features", {})
             icd_code_descriptions = features.get("icd_code_descriptions", [])
-            protocol_rank_score = 1.0 / (1.0 + rank_idx)
 
             for code in icd_codes:
                 if code in seen_codes:
                     continue
                 seen_codes.add(code)
 
-                # Embedding similarity
                 emb_sim = 0.0
+                tfidf_sim = 0.0
                 if code in self.code_to_idx:
                     cidx = self.code_to_idx[code]
                     emb_sim = float(np.dot(query_norm, self.code_embeddings[cidx]))
+                    if self.code_tfidf is not None:
+                        tfidf_sim = float(
+                            cosine_similarity(query_tfidf, self.code_tfidf[cidx:cidx + 1])[0, 0]
+                        )
 
-                # TF-IDF similarity
-                tfidf_sim = 0.0
-                if code in self.code_to_idx and self.code_tfidf is not None:
-                    cidx = self.code_to_idx[code]
-                    tfidf_sim = float(
-                        cosine_similarity(query_tfidf, self.code_tfidf[cidx:cidx + 1])[0, 0]
-                    )
-
-                # Get code metadata
                 code_name = code
                 dist_features = ""
                 for cd in icd_code_descriptions:
@@ -130,76 +237,48 @@ class DiagnosisEngine:
                     "explanation": explanation,
                     "emb_sim": emb_sim,
                     "tfidf_sim": tfidf_sim,
-                    "rank_score": protocol_rank_score,
+                    "protocol_rank": rank_idx,
                 })
 
         return candidates
-
-    def diagnose(
-        self,
-        symptoms: str,
-        top_n: int = settings.top_n_diagnoses,
-        w_code_embedding: float | None = None,
-        w_code_tfidf: float | None = None,
-        w_protocol_rank: float | None = None,
-    ) -> list[dict]:
-        """Run full diagnosis pipeline with multi-signal code ranking."""
-        if not symptoms or not symptoms.strip():
-            return []
-
-        w_emb = w_code_embedding if w_code_embedding is not None else self.w_code_embedding
-        w_tfidf = w_code_tfidf if w_code_tfidf is not None else self.w_code_tfidf
-        w_rank = w_protocol_rank if w_protocol_rank is not None else self.w_protocol_rank
-
-        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
-
-        query_embedding = self.retriever.model.encode(
-            f"query: {symptoms}", show_progress_bar=False
-        )
-        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
-        query_tfidf = self.tfidf.transform([symptoms])
-
-        candidates = self._collect_candidates(symptoms, query_norm, query_tfidf, retrieved)
-        return self.score_candidates(candidates, w_emb, w_tfidf, w_rank, top_n)
-
-    def precompute_candidates(self, symptoms: str) -> list[dict]:
-        """Retrieve protocols and compute per-code signals without combining.
-
-        Returns list of candidate dicts with raw signal scores for later
-        weight optimization (avoids re-running retrieval + cross-encoder).
-        """
-        if not symptoms or not symptoms.strip():
-            return []
-
-        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
-
-        query_embedding = self.retriever.model.encode(
-            f"query: {symptoms}", show_progress_bar=False
-        )
-        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
-        query_tfidf = self.tfidf.transform([symptoms])
-
-        return self._collect_candidates(symptoms, query_norm, query_tfidf, retrieved)
 
     @staticmethod
     def score_candidates(
         candidates: list[dict],
         w_emb: float,
         w_tfidf: float,
-        w_rank: float,
         top_n: int = 3,
     ) -> list[dict]:
-        """Score pre-computed candidates with given weights (no model calls)."""
-        for c in candidates:
-            c["score"] = w_rank * c["rank_score"] + w_emb * c["emb_sim"] + w_tfidf * c["tfidf_sim"]
+        """Score pre-computed candidates with protocol-first strategy.
 
-        ranked = sorted(candidates, key=lambda x: -x["score"])
+        Candidates are grouped by protocol_rank. Within each protocol,
+        codes are sorted by weighted emb+tfidf score.
+        """
+        if not candidates:
+            return []
+
+        # Group by protocol rank
+        from collections import defaultdict
+        by_rank = defaultdict(list)
+        for c in candidates:
+            by_rank[c["protocol_rank"]].append(c)
+
         results = []
-        for cand in ranked[:top_n]:
-            results.append({
-                "rank": len(results) + 1,
-                "diagnosis": cand["code_name"],
-                "icd10_code": cand["code"],
-                "explanation": cand["explanation"],
-            })
+        for rank in sorted(by_rank.keys()):
+            group = by_rank[rank]
+            # Sort within protocol by weighted score
+            for c in group:
+                c["_score"] = w_emb * c["emb_sim"] + w_tfidf * c["tfidf_sim"]
+            group.sort(key=lambda x: -x["_score"])
+
+            for cand in group:
+                results.append({
+                    "rank": len(results) + 1,
+                    "diagnosis": cand["code_name"],
+                    "icd10_code": cand["code"],
+                    "explanation": cand["explanation"],
+                })
+                if len(results) >= top_n:
+                    return results
+
         return results

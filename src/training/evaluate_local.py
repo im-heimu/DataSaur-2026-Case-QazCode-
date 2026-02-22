@@ -24,15 +24,12 @@ def evaluate(
     test_queries: list[dict],
     w_code_embedding: float | None = None,
     w_code_tfidf: float | None = None,
-    w_protocol_rank: float | None = None,
     show_progress: bool = True,
 ) -> dict:
-    """Evaluate engine on test queries with optional custom weights.
-
-    Returns dict with accuracy_at_1, recall_at_3, avg_latency, p95_latency.
-    """
+    """Evaluate engine on test queries with optional custom weights."""
     accuracy_hits = 0
     recall_hits = 0
+    retrieval_hits = 0
     latencies = []
 
     iterator = tqdm(test_queries, desc="Evaluating") if show_progress else test_queries
@@ -47,7 +44,6 @@ def evaluate(
             query,
             w_code_embedding=w_code_embedding,
             w_code_tfidf=w_code_tfidf,
-            w_protocol_rank=w_protocol_rank,
         )
         elapsed = time.perf_counter() - start
         latencies.append(elapsed)
@@ -75,14 +71,13 @@ def evaluate(
 
 
 def optimize_weights(engine: DiagnosisEngine, test_queries: list[dict]):
-    """Grid search over scoring weights using pre-cached retrieval results.
+    """Grid search over code ranking weights using pre-cached retrieval.
 
-    Runs retrieval + cross-encoder once, then sweeps weights instantly.
+    Protocol-first strategy is fixed; only tiebreaker weights are tuned.
     """
-    logger.info("=== Weight Optimization ===")
+    logger.info("=== Weight Optimization (protocol-first, tiebreaker weights) ===")
     logger.info("Pre-computing candidates for all {} queries (one-time)...", len(test_queries))
 
-    # Cache retrieval + signal computation (the expensive part)
     cached = []
     for tq in tqdm(test_queries, desc="Pre-computing"):
         candidates = engine.precompute_candidates(tq["query"])
@@ -100,44 +95,42 @@ def optimize_weights(engine: DiagnosisEngine, test_queries: list[dict]):
 
     weight_grid = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
-    total_combos = len(weight_grid) ** 3
+    total_combos = len(weight_grid) ** 2
     combo_i = 0
 
-    for w_rank in weight_grid:
-        for w_emb in weight_grid:
-            for w_tfidf in weight_grid:
-                combo_i += 1
-                accuracy_hits = 0
-                recall_hits = 0
+    for w_emb in weight_grid:
+        for w_tfidf in weight_grid:
+            combo_i += 1
+            accuracy_hits = 0
+            recall_hits = 0
 
-                for item in cached:
-                    results = DiagnosisEngine.score_candidates(
-                        item["candidates"], w_emb, w_tfidf, w_rank, top_n=3
-                    )
-                    top_codes = [r["icd10_code"] for r in results[:3]]
+            for item in cached:
+                results = DiagnosisEngine.score_candidates(
+                    item["candidates"], w_emb, w_tfidf, top_n=3
+                )
+                top_codes = [r["icd10_code"] for r in results[:3]]
 
-                    if top_codes and top_codes[0] == item["gt"]:
-                        accuracy_hits += 1
-                    if any(c in item["valid_codes"] for c in top_codes):
-                        recall_hits += 1
+                if top_codes and top_codes[0] == item["gt"]:
+                    accuracy_hits += 1
+                if any(c in item["valid_codes"] for c in top_codes):
+                    recall_hits += 1
 
-                total = len(cached)
-                acc = accuracy_hits / total
-                rec = recall_hits / total
-                combined = acc + rec
+            total = len(cached)
+            acc = accuracy_hits / total
+            rec = recall_hits / total
+            combined = acc + rec
 
-                if acc > best_accuracy["score"]:
-                    best_accuracy = {"score": acc, "weights": {"emb": w_emb, "tfidf": w_tfidf, "rank": w_rank}}
-                if rec > best_recall["score"]:
-                    best_recall = {"score": rec, "weights": {"emb": w_emb, "tfidf": w_tfidf, "rank": w_rank}}
-                if combined > best_combined["score"]:
-                    best_combined = {"score": combined, "weights": {"emb": w_emb, "tfidf": w_tfidf, "rank": w_rank}}
+            if acc > best_accuracy["score"]:
+                best_accuracy = {"score": acc, "weights": {"emb": w_emb, "tfidf": w_tfidf}}
+            if rec > best_recall["score"]:
+                best_recall = {"score": rec, "weights": {"emb": w_emb, "tfidf": w_tfidf}}
+            if combined > best_combined["score"]:
+                best_combined = {"score": combined, "weights": {"emb": w_emb, "tfidf": w_tfidf}}
 
-                if combo_i % 100 == 0:
-                    logger.info(
-                        "  [{}/{}] rank={:.1f} emb={:.1f} tfidf={:.1f} => acc={:.4f} rec={:.4f}",
-                        combo_i, total_combos, w_rank, w_emb, w_tfidf, acc, rec
-                    )
+            logger.info(
+                "  [{}/{}] emb={:.1f} tfidf={:.1f} => acc={:.4f} rec={:.4f}",
+                combo_i, total_combos, w_emb, w_tfidf, acc, rec
+            )
 
     logger.info("=== Optimization Results ({} combos tested) ===", total_combos)
     logger.info("Best Accuracy@1: {:.4f} weights={}", best_accuracy["score"], best_accuracy["weights"])

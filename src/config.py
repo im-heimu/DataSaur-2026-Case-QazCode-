@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     ranker_reg_lambda: float = 0.1
 
     # ── Cross-encoder reranker ────────────────────────────────────
+    reranker_enabled: bool = False  # disabled: generic mmarco hurts medical retrieval
     reranker_model_name: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     reranker_top_k_input: int = 50   # retrieve this many for reranking
     reranker_top_k_output: int = 10  # keep this many after reranking

@@ -7,11 +7,10 @@ from loguru import logger
 from sentence_transformers import SentenceTransformer
 
 from src.config import settings
-from src.inference.reranker import ProtocolReranker
 
 
 class ProtocolRetriever:
-    """Retrieves top-K protocols using fine-tuned semantic search + cross-encoder reranking."""
+    """Retrieves top-K protocols using fine-tuned semantic search, optionally with cross-encoder reranking."""
 
     def __init__(self):
         logger.info("  Loading retriever model...")
@@ -29,14 +28,17 @@ class ProtocolRetriever:
         norms = np.linalg.norm(self.embeddings, axis=1, keepdims=True)
         self.embeddings_normalized = self.embeddings / np.maximum(norms, 1e-8)
 
-        # Load passage texts for cross-encoder reranking
-        logger.info("  Loading passage texts for reranker...")
-        self.passages = self._load_passages()
+        # Cross-encoder reranker (optional)
+        self.reranker = None
+        self.passages = {}
+        if settings.reranker_enabled:
+            from src.inference.reranker import ProtocolReranker
+            logger.info("  Loading passage texts for reranker...")
+            self.passages = self._load_passages()
+            self.reranker = ProtocolReranker()
 
-        # Initialize cross-encoder reranker
-        self.reranker = ProtocolReranker()
-
-        logger.info("  Retriever ready: {} protocols (semantic + cross-encoder)", len(self.protocol_ids))
+        mode = "semantic + cross-encoder" if self.reranker else "semantic-only"
+        logger.info("  Retriever ready: {} protocols ({})", len(self.protocol_ids), mode)
 
     def _load_passages(self) -> dict[str, str]:
         """Load protocol passage texts for cross-encoder input."""
@@ -90,7 +92,7 @@ class ProtocolRetriever:
     def retrieve(
         self, query: str, top_k: int = settings.top_k_protocols
     ) -> list[tuple[str, float]]:
-        """Retrieve top-K protocols using bi-encoder + cross-encoder reranking.
+        """Retrieve top-K protocols.
 
         Returns list of (protocol_id, score) tuples.
         """
@@ -103,14 +105,13 @@ class ProtocolRetriever:
         query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
         scores = np.dot(self.embeddings_normalized, query_norm)
 
-        # Step 1: Bi-encoder retrieves top-N candidates
-        bi_top_k = settings.reranker_top_k_input
-        top_indices = np.argsort(scores)[-bi_top_k:][::-1]
-        bi_candidates = [(self.protocol_ids[idx], float(scores[idx])) for idx in top_indices]
-
-        # Step 2: Cross-encoder reranks to top-K
-        reranked = self.reranker.rerank(
-            query, bi_candidates, self.passages, top_k=top_k
-        )
-
-        return reranked
+        if self.reranker:
+            # Bi-encoder top-N -> cross-encoder rerank to top-K
+            bi_top_k = settings.reranker_top_k_input
+            top_indices = np.argsort(scores)[-bi_top_k:][::-1]
+            bi_candidates = [(self.protocol_ids[idx], float(scores[idx])) for idx in top_indices]
+            return self.reranker.rerank(query, bi_candidates, self.passages, top_k=top_k)
+        else:
+            # Pure bi-encoder
+            top_indices = np.argsort(scores)[-top_k:][::-1]
+            return [(self.protocol_ids[idx], float(scores[idx])) for idx in top_indices]
