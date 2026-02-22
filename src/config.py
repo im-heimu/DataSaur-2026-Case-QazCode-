@@ -69,7 +69,7 @@ class Settings(BaseSettings):
 
     # ── Code ranking weights (tiebreaker within protocol) ────
     w_code_embedding: float = 0.1
-    w_code_tfidf: float = 0.1
+    w_code_tfidf: float = 0.7
 
     # ── Text processing ─────────────────────────────────────────
     truncation_markers: list[str] = [
