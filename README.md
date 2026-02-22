@@ -1,120 +1,151 @@
-# Datasaur 2026 | Qazcode Challenge
+# DataSaur — Medical Diagnosis (Symptoms → ICD-10)
 
-## Medical Diagnosis Assistant: Symptoms → ICD-10
+Система диагностики: свободный текст симптомов → топ-3 диагноза с кодами МКБ-10.
+Основана на 1137 клинических протоколах Казахстана.
 
-An AI-powered clinical decision support system that converts patient symptoms into structured diagnoses with ICD-10 codes, built on Kazakhstan clinical protocols.
+## Архитектура
 
----
+1. **Retriever** — fine-tuned `multilingual-e5-base`, semantic search по протоколам
+2. **Code ranker** — protocol-first ordering + embedding/TF-IDF tiebreaker внутри протокола
+3. **LLM reranker** (опционально) — QazCode `oss-120b` переранжирует топ-15 кандидатов
 
-## Challenge Overview
+## Быстрый старт
 
-Participants will build an MVP product where users input symptoms as free text and receive:
+### Требования
+- Python 3.12
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- ~1.5GB на модели (`models/`)
 
-- **Top-N probable diagnoses** ranked by likelihood
-- **ICD-10 codes** for each diagnosis
-- **Brief clinical explanations** based on official Kazakhstan protocols
-
-The solution **must** run **using GPT-OSS** — no external LLM API calls allowed. Refer to `notebooks/llm_api_examples.ipynb`
-
----
-## Data Sources
-
-### Kazakhstan Clinical Protocols
-Official clinical guidelines serving as the primary knowledge base for diagnoses and diagnostic criteria.[[corpus.zip](https://github.com/user-attachments/files/25365231/corpus.zip)]
-
-Data Format
-
-```json
-{"protocol_id": "p_d57148b2d4", "source_file": "HELLP-СИНДРОМ.pdf", "title": "Одобрен", "icd_codes": ["O00", "O99"], "text": "Одобрен Объединенной комиссией по качеству медицинских услуг Министерства здравоохранения Республики Казахстан от «13» января 2023 года Протокол №177 КЛИНИЧЕСКИЙ ПРОТОКОЛ ДИАГНОСТИКИ И ЛЕЧЕНИЯ HELLP-СИНДРОМ I. ВВОДНАЯ ЧАСТЬ 1.1 Код(ы) МКБ-10: Код МКБ-10 O00-O99 Беременность, роды и послеродовой период О14.2 HELLP-синдром 1.2 Дата разработки/пересмотра протокола: 2022 год. ..."}
-
-```
-
----
-
-## Evaluation
-
-### Metrics
-- **Primary metrics:** Accuracy@1, Recall@3, Latency
-- **Test set:**: Dataset with cases (`data/test_set`), use `query` and `gt` fields.
-- **Holdout set:** Private test cases (not included in this repository)
-
-### Product Evaluation
-Working demo interface: user inputs symptoms → system returns diagnoses with ICD-10 codes;
-
----
-## Getting Started
-
-### 1. Clone the repository
-```bash
-git clone https://github.com/dair-mus/hack-nu.git
-cd hack-nu
-```
-
-### 2. Set up the environment
-We kindly ask you to use `uv` as your Python package manager.
-
-Make sure that `uv` is installed. Refer to [uv documentation](https://docs.astral.sh/uv/getting-started/installation/)
+### Установка
 
 ```bash
-uv venv
-source .venv/bin/activate
+git clone <repo-url> && cd hack-nu
 uv sync
 ```
 
-### 3. Running validation
-You can use `src/mock_server.py` as an example service. (however, it has no web UI, only an endpoint for eval). 
+> **Модели не включены в репозиторий** (~800MB). Скачай архив `models.tar.gz` отдельно и распакуй:
+> ```bash
+> tar xzf models.tar.gz
+> # В корне проекта должна появиться папка models/
+> ```
+
+### Запуск сервера
+
 ```bash
-uv run uvicorn src.mock_server:app --host 127.0.0.1 --port 8000
+uv run uvicorn src.server:app --host 0.0.0.0 --port 8080
 ```
-Then run the validation pipeline in a separate terminal:
-```bash
-uv run python evaluate.py -e http://127.0.0.1:8000/diagnose -d ./data/test_set -n <your_team_name>
+
+Эндпоинт: `POST /diagnose`
+
+```json
+{"symptoms": "боль в груди, одышка, повышение температуры"}
 ```
-`-e`: endpoint (POST request) that will accept the symptoms
 
-`-d`: path to the directory with protocols
+Ответ:
 
-`-n`: name of your team (please avoid special symbols)
-
-By default, the evalutaion results will be output to `data/evals`.
+```json
+{
+  "diagnoses": [
+    {"rank": 1, "diagnosis": "...", "icd10_code": "J18.9", "explanation": "..."},
+    {"rank": 2, "diagnosis": "...", "icd10_code": "J15.9", "explanation": "..."},
+    {"rank": 3, "diagnosis": "...", "icd10_code": "J44.1", "explanation": "..."}
+  ]
+}
+```
 
 ### Docker
-We prepared a Dockerfile to run our mock server example.
+
 ```bash
-docker build -t mock-server .
-docker run -p 8000:8000 mock-server
+docker build -t diagnosis .
+docker run -p 8080:8080 diagnosis
 ```
-Then run the validation as shown above.
 
-Feel free to use the mock-server FastAPI template and Dockerfile structure to build your own project around.
+Контейнер включает все модели и данные, внешних вызовов нет.
 
-Remember to adjust the CMD in Dockerfile for your real Python server instead of `src.mock_server:app` before submission. 
+Для LLM-реранкинга (опционально):
 
-### Submission Checklist
+```bash
+docker run -p 8080:8080 -e QAZCODE_ENABLED=true -e QAZCODE_KEY=<key> diagnosis
+```
 
-- [ ] Everything packed into a single project (application, models, vector DB, indexes)
-- [ ] Image builds successfully: `docker build -t submission .`
-- [ ] Container starts and serves on port 8080: `docker run -p 8080:8080 submission`
-- [ ] Web UI accepts free-text symptoms input
-- [ ] Endpoint for POST requests accepts free-text symptoms
-- [ ] Returns top-N diagnoses with ICD-10 codes
-- [ ] No external network calls during inference
-- [ ] README with build and run instructions
+## Бенчмарк
 
-### How to Submit
+```bash
+# Запустить сервер (в одном терминале):
+uv run uvicorn src.server:app --host 127.0.0.1 --port 8080
 
-1. Provide a Git repository with `Dockerfile`
-2. Submit the link via [submission form](https://docs.google.com/forms/d/e/1FAIpQLSe8qg6LsgJroHf9u_MVDBLPqD8S_W6MrphAteRqG-c4cqhQDw/viewform)
-3. We will pull, build, and run your container on the private holdout set
----
+# Eval (в другом терминале):
+uv run python evaluate.py -e http://127.0.0.1:8080/diagnose -d ./data/test_set -n test
+```
 
-### Repo structure
-- `data/evals`: evaluation results directory
-- `data/examples/response.json`: example of a JSON response from your project endpoint
-- `data/test_set`: use these to evaluate your solution. 
-- `notebooks/llm_api_examples.ipynb`: shows how to make a request to GPT-OSS.
-- `src/`: solution source code would go here, has a `mock_server.py` as an entrypoint example.
-- `evaluate.py`: runs the given dataset through the provided endpoint.
-- `pyproject.toml`: describes dependencies of the project.
-- `uv.lock`: stores the exact dependency versions, autogenerated by uv.
-- `Dockerfile`: contains build instructions for a Docker image.
+Результаты → `data/evals/test_metrics.json`
+
+Локальный eval без HTTP (быстрее):
+
+```bash
+uv run python -m src.training.evaluate_local            # без LLM
+uv run python -m src.training.evaluate_local --llm       # с LLM
+uv run python -m src.training.evaluate_local --optimize   # подбор весов
+```
+
+### Метрики (test_set, 221 кейс)
+
+| Метрика | Значение |
+|---------|----------|
+| Accuracy@1 | ~10% |
+| Recall@3 | ~43% |
+| Avg latency | 0.020s |
+
+## Пайплайн обучения (воспроизведение)
+
+Если нужно переобучить с нуля:
+
+```bash
+# 1. Извлечь фичи из протоколов (нужен GPT-OSS ключ в .env)
+uv run python -m src.data_prep.extract_features
+uv run python -m src.data_prep.generate_summaries
+uv run python -m src.data_prep.generate_synthetic
+
+# 2. Обучить retriever (~25 мин на GPU)
+uv run python -m src.training.train_retriever
+
+# 3. Экспорт моделей для inference
+uv run python -m src.training.export_model
+
+# 4. Оптимизация весов
+uv run python -m src.training.evaluate_local --optimize
+# → обновить w_code_embedding / w_code_tfidf в src/config.py
+```
+
+## Структура
+
+```
+models/              # retriever, embeddings, TF-IDF, protocol data (~800MB)
+data/test_set/       # 221 тестовый кейс (query + gt + icd_codes)
+data/processed/      # извлечённые фичи, синтетика, саммари
+corpus/              # исходные клинические протоколы
+src/
+  server.py          # FastAPI сервер (POST /diagnose)
+  config.py          # все настройки и пути
+  inference/
+    engine.py        # DiagnosisEngine — основной пайплайн
+    retriever.py     # semantic retriever
+    llm_ranker.py    # LLM reranker (QazCode oss-120b)
+  training/
+    train_retriever.py    # обучение bi-encoder
+    evaluate_local.py     # локальный eval + оптимизация весов
+    export_model.py       # экспорт для inference
+  data_prep/         # подготовка данных (extract, summarize, synthetic)
+evaluate.py          # HTTP-based eval скрипт
+Dockerfile           # production image
+```
+
+## Конфигурация
+
+Через env-переменные или `.env` файл:
+
+| Переменная | По умолчанию | Описание |
+|-----------|-------------|----------|
+| `QAZCODE_ENABLED` | `false` | Включить LLM реранкинг |
+| `QAZCODE_KEY` | — | API ключ QazCode |
+| `QAZCODE_URL` | `https://hub.qazcode.ai` | URL API |
