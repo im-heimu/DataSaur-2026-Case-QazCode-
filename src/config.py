@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     reranker_top_k_output: int = 10  # keep this many after reranking
 
     # ── Inference ───────────────────────────────────────────────
-    top_k_protocols: int = 30
+    top_k_protocols: int = 20
     top_n_diagnoses: int = 3
 
     # ── Code ranking weights (tiebreaker within protocol) ────
