@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     retriever_model_name: str = "intfloat/multilingual-e5-base"
     retriever_max_seq_length: int = 512
     retriever_epochs: int = 5
-    retriever_batch_size: int = 64
+    retriever_batch_size: int = 96
     retriever_lr: float = 2e-5
     retriever_max_per_protocol: int = 20
     retriever_hard_negatives_per_positive: int = 2
