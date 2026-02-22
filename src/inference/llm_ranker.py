@@ -5,6 +5,7 @@ select the most appropriate diagnosis using clinical reasoning.
 """
 
 import json
+import re
 
 import httpx
 from loguru import logger
@@ -39,17 +40,55 @@ def build_candidates_text(candidates: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _extract_codes_from_text(text: str, valid_codes: set[str]) -> list[str] | None:
+    """Try to extract ICD codes from any text (JSON, reasoning, etc.)."""
+    # Try 1: Parse as JSON directly
+    try:
+        parsed = json.loads(text)
+        codes = parsed.get("codes", [])
+        if codes:
+            filtered = [c for c in codes if c in valid_codes]
+            if filtered:
+                return filtered[:3]
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Try 2: Find JSON object with "codes" in text
+    json_match = re.search(r'\{[^{}]*"codes"\s*:\s*\[[^\]]*\][^{}]*\}', text)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(0))
+            codes = parsed.get("codes", [])
+            filtered = [c for c in codes if c in valid_codes]
+            if filtered:
+                return filtered[:3]
+        except json.JSONDecodeError:
+            pass
+
+    # Try 3: Find quoted ICD codes directly in text
+    found = []
+    for code in valid_codes:
+        # Match code in quotes or after numbering
+        if re.search(rf'["\']?{re.escape(code)}["\']?', text):
+            found.append(code)
+    if found:
+        # Try to preserve order from text
+        positions = []
+        for code in found:
+            pos = text.find(code)
+            positions.append((pos, code))
+        positions.sort()
+        return [code for _, code in positions][:3]
+
+    return None
+
+
 def llm_rerank(
     symptoms: str,
     candidates: list[dict],
-    timeout: float = 15.0,
+    timeout: float = 30.0,
 ) -> list[str] | None:
     """Ask QazCode LLM to select best 3 codes from candidates.
-
-    Args:
-        symptoms: patient symptom text
-        candidates: list of candidate dicts with icd10_code, diagnosis, explanation
-        timeout: request timeout in seconds
 
     Returns:
         List of 3 ICD codes in order of likelihood, or None on failure.
@@ -58,6 +97,9 @@ def llm_rerank(
         return None
 
     candidates_text = build_candidates_text(candidates)
+    valid_codes = {
+        c.get("icd10_code") or c.get("code", "") for c in candidates
+    }
 
     user_prompt = f"""Описание пациента:
 {symptoms}
@@ -80,7 +122,7 @@ def llm_rerank(
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_prompt},
                 ],
-                "max_tokens": 100,
+                "max_tokens": 200,
                 "temperature": 0.0,
             },
             timeout=timeout,
@@ -89,49 +131,39 @@ def llm_rerank(
         data = response.json()
 
         message = data["choices"][0]["message"]
-        content = message.get("content") or ""
-        # Reasoning models may put answer in reasoning_content
-        if not content.strip():
-            content = (
-                message.get("reasoning_content")
-                or message.get("provider_specific_fields", {}).get("reasoning_content")
-                or ""
-            )
-        content = content.strip()
 
-        if not content:
-            logger.warning("LLM returned empty content")
+        # Collect all text from response (content + reasoning)
+        all_texts = []
+        content = message.get("content")
+        if content:
+            all_texts.append(content)
+
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            all_texts.append(reasoning)
+
+        psf = message.get("provider_specific_fields", {})
+        if psf:
+            for key in ("reasoning", "reasoning_content"):
+                val = psf.get(key)
+                if val and val not in all_texts:
+                    all_texts.append(val)
+
+        if not all_texts:
+            logger.warning("LLM returned no content at all")
             return None
 
-        # Parse JSON from response (handle markdown wrapping)
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
+        # Try to extract codes from each text, preferring content over reasoning
+        for text in all_texts:
+            codes = _extract_codes_from_text(text, valid_codes)
+            if codes:
+                return codes
 
-        # Try to extract JSON from mixed text
-        if not content.startswith("{"):
-            import re
-            json_match = re.search(r'\{[^}]*"codes"\s*:\s*\[[^\]]*\][^}]*\}', content)
-            if json_match:
-                content = json_match.group(0)
-
-        parsed = json.loads(content)
-        codes = parsed.get("codes", [])
-
-        if codes and isinstance(codes, list):
-            # Validate codes are from candidates
-            valid_codes = {
-                c.get("icd10_code") or c.get("code", "") for c in candidates
-            }
-            filtered = [c for c in codes if c in valid_codes]
-            if filtered:
-                return filtered[:3]
-
-        logger.warning("LLM returned invalid codes: {}", codes)
+        # Log first 200 chars for debugging
+        combined = " | ".join(t[:100] for t in all_texts)
+        logger.warning("LLM: could not extract codes from: {}", combined[:200])
         return None
 
-    except (httpx.HTTPError, json.JSONDecodeError, KeyError, IndexError) as e:
+    except (httpx.HTTPError, KeyError, IndexError) as e:
         logger.warning("LLM rerank failed: {}", e)
         return None
