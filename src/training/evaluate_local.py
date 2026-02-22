@@ -145,7 +145,11 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--optimize", action="store_true", help="Run weight optimization")
+    parser.add_argument("--llm", action="store_true", help="Enable QazCode LLM reranking")
     args = parser.parse_args()
+
+    if args.llm:
+        settings.qazcode_enabled = True
 
     logger.info("Loading inference engine...")
     engine = DiagnosisEngine()

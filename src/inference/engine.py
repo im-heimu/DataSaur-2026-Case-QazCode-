@@ -1,4 +1,4 @@
-"""DiagnosisEngine: retrieval + protocol-first code ranking with multi-signal tiebreaking."""
+"""DiagnosisEngine: retrieval + protocol-first code ranking + optional LLM reranking."""
 
 import json
 import pickle
@@ -9,6 +9,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from src.config import settings
 from src.inference.retriever import ProtocolRetriever
+from src.inference.llm_ranker import llm_rerank
 
 
 class DiagnosisEngine:
@@ -66,8 +67,9 @@ class DiagnosisEngine:
         self.w_code_embedding = settings.w_code_embedding
         self.w_code_tfidf = settings.w_code_tfidf
 
-        logger.info("DiagnosisEngine ready! (tiebreak weights: emb={}, tfidf={})",
-                     self.w_code_embedding, self.w_code_tfidf)
+        self.llm_enabled = settings.qazcode_enabled
+        logger.info("DiagnosisEngine ready! (tiebreak weights: emb={}, tfidf={}, llm={})",
+                     self.w_code_embedding, self.w_code_tfidf, self.llm_enabled)
 
     def _code_score(self, code: str, query_norm: np.ndarray, query_tfidf) -> float:
         """Compute combined code similarity score for within-protocol ranking."""
@@ -84,40 +86,15 @@ class DiagnosisEngine:
 
         return self.w_code_embedding * emb_sim + self.w_code_tfidf * tfidf_sim
 
-    def diagnose(
+    def _collect_all_candidates(
         self,
         symptoms: str,
-        top_n: int = settings.top_n_diagnoses,
-        w_code_embedding: float | None = None,
-        w_code_tfidf: float | None = None,
+        retrieved: list[tuple[str, float]],
+        query_norm: np.ndarray,
+        query_tfidf,
+        max_candidates: int = 10,
     ) -> list[dict]:
-        """Run full diagnosis pipeline.
-
-        Protocol-first strategy: emit codes from the best-ranked protocol
-        first, using embedding + TF-IDF similarity only as tiebreaker
-        within the same protocol.
-        """
-        if not symptoms or not symptoms.strip():
-            return []
-
-        # Allow weight override for optimization
-        orig_w_emb, orig_w_tfidf = self.w_code_embedding, self.w_code_tfidf
-        if w_code_embedding is not None:
-            self.w_code_embedding = w_code_embedding
-        if w_code_tfidf is not None:
-            self.w_code_tfidf = w_code_tfidf
-
-        # Step 1: Retrieve top-K protocols
-        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
-
-        # Step 2: Encode query for code scoring
-        query_embedding = self.retriever.model.encode(
-            f"query: {symptoms}", show_progress_bar=False
-        )
-        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
-        query_tfidf = self.tfidf.transform([symptoms])
-
-        # Step 3: Protocol-first code emission
+        """Collect top candidate codes from retrieved protocols (protocol-first)."""
         results = []
         seen_codes = set()
 
@@ -130,7 +107,6 @@ class DiagnosisEngine:
             features = pd.get("features", {})
             icd_code_descriptions = features.get("icd_code_descriptions", [])
 
-            # Score and sort codes within this protocol
             code_scores = []
             for code in icd_codes:
                 if code in seen_codes:
@@ -165,14 +141,87 @@ class DiagnosisEngine:
                     "explanation": explanation,
                 })
 
-                if len(results) >= top_n:
-                    # Restore weights
-                    self.w_code_embedding, self.w_code_tfidf = orig_w_emb, orig_w_tfidf
+                if len(results) >= max_candidates:
                     return results
+
+        return results
+
+    def diagnose(
+        self,
+        symptoms: str,
+        top_n: int = settings.top_n_diagnoses,
+        w_code_embedding: float | None = None,
+        w_code_tfidf: float | None = None,
+    ) -> list[dict]:
+        """Run full diagnosis pipeline.
+
+        Protocol-first strategy with optional LLM reranking:
+        1. Retrieve top-K protocols
+        2. Collect top-10 candidate codes (protocol-first + tiebreaker)
+        3. If LLM enabled: ask LLM to pick best 3 from 10 candidates
+        4. If LLM disabled or fails: return top-3 from step 2
+        """
+        if not symptoms or not symptoms.strip():
+            return []
+
+        # Allow weight override for optimization
+        orig_w_emb, orig_w_tfidf = self.w_code_embedding, self.w_code_tfidf
+        if w_code_embedding is not None:
+            self.w_code_embedding = w_code_embedding
+        if w_code_tfidf is not None:
+            self.w_code_tfidf = w_code_tfidf
+
+        # Step 1: Retrieve top-K protocols
+        retrieved = self.retriever.retrieve(symptoms, top_k=settings.top_k_protocols)
+
+        # Step 2: Encode query for code scoring
+        query_embedding = self.retriever.model.encode(
+            f"query: {symptoms}", show_progress_bar=False
+        )
+        query_norm = query_embedding / max(np.linalg.norm(query_embedding), 1e-8)
+        query_tfidf = self.tfidf.transform([symptoms])
+
+        # Step 3: Collect wider candidate pool for LLM (or just top_n if no LLM)
+        n_candidates = 10 if self.llm_enabled else top_n
+        candidates = self._collect_all_candidates(
+            symptoms, retrieved, query_norm, query_tfidf, max_candidates=n_candidates
+        )
 
         # Restore weights
         self.w_code_embedding, self.w_code_tfidf = orig_w_emb, orig_w_tfidf
-        return results
+
+        # Step 4: LLM reranking
+        if self.llm_enabled and len(candidates) > top_n:
+            llm_codes = llm_rerank(symptoms, candidates)
+            if llm_codes:
+                # Build results from LLM-selected codes
+                code_to_cand = {c["icd10_code"]: c for c in candidates}
+                llm_results = []
+                for code in llm_codes[:top_n]:
+                    if code in code_to_cand:
+                        cand = code_to_cand[code]
+                        llm_results.append({
+                            "rank": len(llm_results) + 1,
+                            "diagnosis": cand["diagnosis"],
+                            "icd10_code": cand["icd10_code"],
+                            "explanation": cand["explanation"],
+                        })
+                # Fill remaining slots from retriever order if LLM returned < top_n
+                if len(llm_results) < top_n:
+                    llm_selected = {r["icd10_code"] for r in llm_results}
+                    for cand in candidates:
+                        if cand["icd10_code"] not in llm_selected:
+                            llm_results.append({
+                                "rank": len(llm_results) + 1,
+                                "diagnosis": cand["diagnosis"],
+                                "icd10_code": cand["icd10_code"],
+                                "explanation": cand["explanation"],
+                            })
+                            if len(llm_results) >= top_n:
+                                break
+                return llm_results
+
+        return candidates[:top_n]
 
     def precompute_candidates(self, symptoms: str) -> list[dict]:
         """Retrieve protocols and compute per-code signals for weight optimization.
